@@ -1,0 +1,7 @@
+{
+  "email_id": "f2-kessler-20261016",
+  "from": "einkauf@kessler-brau.example",
+  "subject": "Bestellung Gase KW42",
+  "body": "Guten Tag,\n\nanbei unsere Bestellung fuer diese Woche als Excel-Datei. Lieferung bitte wie gewohnt ans Werk.\n\nMit freundlichen Gruessen\nSabine Roth\nEinkauf, Brauerei Kessler GmbH",
+  "attachments": [{"file": "bestellung-kessler-2026-10-16.xlsx", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}]
+}

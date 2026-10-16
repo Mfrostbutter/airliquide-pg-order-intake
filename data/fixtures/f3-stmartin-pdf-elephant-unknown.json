@@ -1,0 +1,7 @@
+{
+  "email_id": "f3-stmartin-20261016",
+  "from": "pharmacie@clinique-stmartin.example",
+  "subject": "Bon de commande 4471 - oxygene medical",
+  "body": "Bonjour,\n\nVeuillez trouver ci-joint notre bon de commande 4471. Nous reprenons egalement 40 bouteilles vides B11 lors de la livraison.\n\nBien cordialement,\nDr. Helene Marchand\nPharmacie, Clinique Saint-Martin",
+  "attachments": [{"file": "bon-de-commande-stmartin-4471.pdf", "mime": "application/pdf"}]
+}

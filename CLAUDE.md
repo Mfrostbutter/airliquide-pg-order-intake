@@ -6,6 +6,7 @@ question to ask the customer, not a blank to guess at.
 ## Context
 
 - **Notion record:** FDE > Engagements row https://app.notion.com/p/3fb5b6e0c94f813abdaaec701c28c1f2 (created 2026-10-16). Manuel's working page: Customers / Air Liquide / Air Liquide RFP.
+- **Git remote:** https://github.com/Mfrostbutter/airliquide-pg-order-intake (private, pushed 2026-10-16). `README.md` documents the workflows with screenshots under `docs/screenshots/`.
 
 - **Customer:** Air Liquide, Group Digital & IT, GDO Automation (Business Process Orchestration & Automation Platform RFP, 2026)
 - **Start date:** 2026-10-16 (lab build). PoC kickoff 2026-10-12, build 2026-10-19 to 2026-11-20 (primary dev week for Frosty: week of 2026-10-26, a few hours a day; Frosty's own target: working solution by 2026-11-15), demo 2026-11-20 (possibly on site in Paris), bidder selection 2026-11-30. Weekly Monday check-ins with Manuel and Morgan. Competitors in the PoC: two unconfirmed, from a field that included UiPath, Appian and ServiceNow. (Sync of 2026-10-16, Notion meeting note.)
@@ -113,4 +114,4 @@ Database `al_poc` on `pg-lab`, schema `data/schema.sql`, seed `data/seed.sql`, o
 
 Append one line per working session: date, what changed, what is deployed where.
 
-- 2026-10-16 — Engagement scaffolded from the RFP pack (Drive folder from Manuel). Five workflows built and verified on the lab: intake `ufx7qhXP8jGqVrus`, Product Agent `yxP9Kgx9uVyEFiRZ`, Shipping Agent `n5UiTb8wRn3qwZ84`, mock ESB `s48vrlMZEkw41gJn`, dashboard `nxdYyNbocTuhw0Jk`. Fixtures F1 (clean, auto, 28 s), F2 (XLSX, auto, 17 s), F3 (PDF, Elephant + unknown product + returns, Draft Order, approved by email link, posted), F4 (inquiry, stopped), F5 (ESB 503 twice, backoff 4 s + 8 s, posted) all pass.
+- 2026-10-16 — Engagement scaffolded from the RFP pack (Drive folder from Manuel). Five workflows built and verified on the lab: intake `ufx7qhXP8jGqVrus`, Product Agent `yxP9Kgx9uVyEFiRZ`, Shipping Agent `n5UiTb8wRn3qwZ84`, mock ESB `s48vrlMZEkw41gJn`, dashboard `nxdYyNbocTuhw0Jk`. Fixtures F1 (clean, auto, 28 s), F2 (XLSX, auto, 17 s), F3 (PDF, Elephant + unknown product + returns, Draft Order, approved by email link, posted), F4 (inquiry, stopped), F5 (ESB 503 twice, backoff 4 s + 8 s, posted) all pass. Private GitHub repo created and pushed with README and canvas screenshots; synthetic `data/` (schema, seed, fixtures) now tracked, `data/fixtures/al/` stays ignored.

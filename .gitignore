@@ -6,8 +6,15 @@
 *.key
 
 # Customer data. Directory is tracked, contents are not.
+# The lab schema, seed and synthetic fixtures are tracked (invented customers,
+# .example domains). Anything from Air Liquide goes under data/fixtures/al/.
 data/*
 !data/.gitkeep
+!data/README.md
+!data/schema.sql
+!data/seed.sql
+!data/fixtures/
+data/fixtures/al/
 
 # Exports that may carry credential values
 credentials*.json
