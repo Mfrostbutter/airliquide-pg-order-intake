@@ -1,0 +1,428 @@
+{
+  "name": "AL PoC: Product Agent (resolve lines against catalog)",
+  "nodes": [
+    {
+      "id": "d685a876-2206-5bc8-9f52-c870480acf60",
+      "name": "StartProductAgent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "order_id",
+              "type": "string"
+            },
+            {
+              "name": "lines",
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "notes": "Inputs: order_id, lines = [{line_no, product_text, product_code_hint, quantity, unit}]"
+    },
+    {
+      "id": "24b5f896-8afd-5120-91fc-45ded4ffd85b",
+      "name": "ResolveProductsWithAgent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Order {{ $json.order_id }}. Resolve each of these lines against the catalogue:\n{{ JSON.stringify(($json.lines || []).map((l, i) => ({ line_no: l.line_no || i + 1, product_text: l.product_text, product_code_hint: l.product_code_hint || '', quantity: l.quantity, unit: l.unit || '' })), null, 2) }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are the Product Agent for Air Liquide packaged-gas order intake. For every order line you receive, find the single catalogue product it refers to, using only the tools. Rules: (1) If the customer gave a code, call lookup_product_by_code first. (2) Otherwise call search_product_by_name with two or three words taken from the customer's own line, in the customer's language (French, German or English): do not translate, the catalogue aliases are multilingual. A cylinder size alone (B50, B11) is not a product. Try at most three searches per line, then give up with not_found. (3) 'exact' means the customer wrote a code that matched a catalogue code (a cylinder size is not a code); 'resolved' means a search returned exactly one product whose name or alias describes the customer's line (same product family, not merely the same gas); 'ambiguous' means several plausible products and you must list them in candidates; 'not_found' means no tool result fits. (4) Never invent a product_code: product_code must be a value a tool returned, or an empty string. (5) Keep quantity and unit as given. Return the JSON the output format requires and nothing else.",
+          "maxIterations": 20,
+          "returnIntermediateSteps": true
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "909b9b00-3607-5809-a495-04a3c3cb817b",
+      "name": "ProductAgentModel",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        272
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "qwen/qwen3-coder-30b"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "baseURL": "http://host.docker.internal:1234/v1",
+          "temperature": 0.1,
+          "maxTokens": 4096
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "MBlabLmStudio001",
+          "name": "LM Studio (lab)"
+        }
+      },
+      "notes": "Lab model. Customer instance: Gemini on Air Liquide's own API key or Vertex AI, by replacing this sub-node."
+    },
+    {
+      "id": "6aa47b8f-725d-57e1-827e-85ca8dfef88f",
+      "name": "lookup_product_by_code",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.7,
+      "position": [
+        208,
+        272
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Look up one catalogue product by its product code. Use when the customer wrote a code such as ARCAL-1-B50 or OXY-IND-B50. Returns product_code, name, unit, category, is_cylinder, or no rows when the code does not exist.",
+        "operation": "executeQuery",
+        "query": "select product_code, name, unit, category, is_cylinder from al_poc.product_catalog\nwhere upper(product_code) = upper($1) or upper(replace(product_code, '-', '')) = upper(replace($1, '-', ''));",
+        "options": {
+          "queryReplacement": "={{ $fromAI('product_code', 'Product code exactly as the customer wrote it, e.g. ARCAL-1-B50', 'string') }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      }
+    },
+    {
+      "id": "3b653399-4a76-58ba-b6ff-7464c0fa03a1",
+      "name": "search_product_by_name",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.7,
+      "position": [
+        416,
+        272
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Search the catalogue by product name or alias fragment. Use a short fragment: the gas or product name plus the cylinder size, e.g. 'arcal 1', 'oxygen B50', 'aligal 2'. Returns up to 10 rows with product_code, name, aliases, unit, category.",
+        "operation": "executeQuery",
+        "query": "with q as (select w from unnest(string_to_array(lower(translate($1, 'éèêëàâäôöûüç', 'eeeeaaaoouuc')), ' ')) w where length(w) >= 2)\nselect p.product_code, p.name, p.aliases, p.unit, p.category from al_poc.product_catalog p\nwhere (select bool_and(lower(p.name) like '%' || w || '%' or exists (select 1 from unnest(p.aliases) a where lower(a) like '%' || w || '%')) from q)\norder by p.product_code limit 10;",
+        "options": {
+          "queryReplacement": "={{ $fromAI('search_term', 'Two or three words from the customer line, in the customer language, e.g. \"arcal 1\", \"detendeur oxygene\", \"kohlensaeure b20\". Every word must match, so drop quantities and filler words.', 'string') }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      }
+    },
+    {
+      "id": "310635f8-0cbe-511f-8c2f-3e75e8deaca6",
+      "name": "ProductOutputParser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        624,
+        272
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"lines\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"line_no\": {\n            \"type\": \"integer\"\n          },\n          \"input_text\": {\n            \"type\": \"string\",\n            \"description\": \"The product exactly as the customer wrote it\"\n          },\n          \"quantity\": {\n            \"type\": \"number\"\n          },\n          \"unit\": {\n            \"type\": \"string\"\n          },\n          \"product_code\": {\n            \"type\": \"string\",\n            \"description\": \"Catalogue product_code returned by a tool, or empty string\"\n          },\n          \"product_name\": {\n            \"type\": \"string\"\n          },\n          \"match\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"exact\",\n              \"resolved\",\n              \"ambiguous\",\n              \"not_found\"\n            ]\n          },\n          \"candidates\": {\n            \"type\": \"array\",\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"explanation\": {\n            \"type\": \"string\",\n            \"description\": \"One sentence: which tool result justified the match, or why none did\"\n          }\n        },\n        \"required\": [\n          \"line_no\",\n          \"input_text\",\n          \"quantity\",\n          \"product_code\",\n          \"match\",\n          \"explanation\"\n        ]\n      }\n    },\n    \"summary\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"lines\",\n    \"summary\"\n  ]\n}",
+        "autoFix": true
+      }
+    },
+    {
+      "id": "bdc6e1e2-422a-5120-99b1-6a2a7a93d050",
+      "name": "ProductParserFixerModel",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        624,
+        480
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "qwen/qwen3-coder-30b"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "baseURL": "http://host.docker.internal:1234/v1",
+          "temperature": 0.0,
+          "maxTokens": 4096
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "MBlabLmStudio001",
+          "name": "LM Studio (lab)"
+        }
+      },
+      "notes": "Second model call only when the agent's JSON does not match the schema."
+    },
+    {
+      "id": "d59cb06f-8646-52ad-bcdb-8d36e2113968",
+      "name": "VerifyProductMatches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        208,
+        928
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select product_code, name, aliases, unit from al_poc.product_catalog\nwhere product_code = any(string_to_array($1, ','));",
+        "options": {
+          "queryReplacement": "={{ [ (($('ResolveProductsWithAgent').first().json.output || {}).lines || []).map(l => String(l.product_code || '').trim()).filter(Boolean).join(',') ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true,
+      "notes": "Deterministic check: every code the agent chose must exist in the catalogue. A hallucinated code is dropped."
+    },
+    {
+      "id": "63b214e5-959d-532c-ac6d-7584301e4f20",
+      "name": "LogProductAgentStep",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        0,
+        928
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\nvalues ($1, $2, $3, $4, $5, $6::jsonb)\nreturning id;",
+        "options": {
+          "queryReplacement": "={{ [$('StartProductAgent').first().json.order_id, $execution.id, 'product_agent', 'ProductAgent', 'Product Agent returned ' + ((($('ResolveProductsWithAgent').first().json.output || {}).lines || []).length) + ' lines', JSON.stringify({ output: $('ResolveProductsWithAgent').first().json.output, steps: ($('ResolveProductsWithAgent').first().json.intermediateSteps || []).map(s => ({ tool: s.action?.tool, input: s.action?.toolInput })) })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "03dda392-87e5-5d52-9387-693afda4edbb",
+      "name": "FinalizeProductValidation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        928
+      ],
+      "parameters": {
+        "jsCode": "// Deterministic post-check over the Product Agent's answer: a code counts only if the catalogue returned it.\nconst agent = $('ResolveProductsWithAgent').first().json;\nconst out = agent.output || {};\nconst verified = new Map(($('VerifyProductMatches').all() || [])\n  .map(i => i.json).filter(r => r && r.product_code).map(r => [r.product_code, r]));\nconst inputLines = $('StartProductAgent').first().json.lines || [];\n// Lexical check: the catalogue row's name or one alias must be mostly present in the customer's words,\n// or the customer must have written the code itself. Same gas in a different product does not pass.\nconst norm = s => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');\nconst toks = s => norm(s).split(/[^a-z0-9]+/).filter(Boolean);\nconst LEX_MIN = 0.6;\nconst lexical = (input, cat) => {\n  const inToks = new Set(toks(input));\n  const flat = norm(input).replace(/[^a-z0-9]/g, '');\n  if (flat.includes(norm(cat.product_code).replace(/[^a-z0-9]/g, ''))) return { ok: true, score: 1, via: 'code' };\n  let best = { ok: false, score: 0, via: '' };\n  for (const cand of [cat.name, ...(cat.aliases || [])]) {\n    const ct = toks(cand);\n    if (!ct.length) continue;\n    const hit = ct.filter(t => inToks.has(t)).length / ct.length;\n    if (hit > best.score) best = { ok: hit >= LEX_MIN, score: Math.round(hit * 100) / 100, via: cand };\n  }\n  return best;\n};\nconst lines = (out.lines || []).map((l, i) => {\n  const code = String(l.product_code || '').trim();\n  const cat = verified.get(code);\n  const okMatch = ['exact', 'resolved'].includes(l.match);\n  const lex = cat ? lexical(l.input_text || inputLines[i]?.product_text || '', cat) : { ok: false, score: 0, via: '' };\n  let status, explanation = l.explanation || '';\n  if (cat && okMatch && lex.ok) status = 'verified';\n  else if (cat && okMatch && !lex.ok) { status = 'ambiguous'; explanation = `Agent chose ${code} but the customer's words do not describe it (lexical overlap ${lex.score}). ${explanation}`; }\n  else if (l.match === 'ambiguous') status = 'ambiguous';\n  else if (code && !cat) status = 'unverified_code';\n  else status = 'not_found';\n  const qty = Number(l.quantity ?? inputLines[i]?.quantity ?? 0);\n  return {\n    line_no: l.line_no ?? i + 1, input_text: l.input_text, quantity: qty, unit: l.unit || cat?.unit || inputLines[i]?.unit || 'EA',\n    product_code: status === 'verified' ? cat.product_code : '', product_name: cat ? cat.name : (l.product_name || ''),\n    match: l.match, status, candidates: status === 'ambiguous' && cat ? [cat.product_code, ...(l.candidates || [])] : (l.candidates || []),\n    explanation, lexical: lex,\n    elephant: qty > 80,\n  };\n});\nconst steps = (agent.intermediateSteps || []).map(s => ({\n  tool: s.action?.tool, input: s.action?.toolInput, observation: String(s.observation ?? '').slice(0, 300),\n}));\nreturn [{ json: {\n  order_id: $('StartProductAgent').first().json.order_id,\n  agent: 'ProductAgent',\n  lines,\n  all_verified: lines.length > 0 && lines.every(l => l.status === 'verified'),\n  elephant_lines: lines.filter(l => l.elephant).map(l => `${l.product_code || l.input_text}: ${l.quantity}`),\n  summary: out.summary || '',\n  tool_calls: steps.length,\n  trace: steps,\n}}];"
+      }
+    },
+    {
+      "id": "1090ab9d-e71e-5579-bd40-434a09bfdde0",
+      "name": "ReportProductAgentFailure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        480
+      ],
+      "parameters": {
+        "jsCode": "// The agent itself failed (model down, max iterations). Return a shape the caller can route to review.\nconst err = $input.first().json;\nreturn [{ json: {\n  order_id: $('StartProductAgent').first().json.order_id, agent: 'ProductAgent', lines: [], all_verified: false,\n  elephant_lines: [], summary: 'Product Agent failed: ' + String(err.error?.message || err.error || 'unknown error'),\n  tool_calls: 0, trace: [], agent_error: true,\n}}];"
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 1. Product Agent\n\nCalled by the intake workflow with the order id and the extracted lines. The agent may only use the two catalogue tools and must return the structured shape; a hallucinated code cannot be returned because the parser schema and the verify step below both reject it.",
+        "width": 1040,
+        "height": 864,
+        "color": 5
+      },
+      "id": "zone-01",
+      "name": "zone-01",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Deterministic verify and log\n\nEvery code the agent chose is re-read from the catalogue. Lines are marked verified, ambiguous, not_found or unverified_code; quantities over 80 are flagged as Elephant Order. The tool calls are written to step_log as the agent's reflection trace.",
+        "width": 656,
+        "height": 400,
+        "color": 3
+      },
+      "id": "zone-02",
+      "name": "zone-02",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        736
+      ]
+    }
+  ],
+  "connections": {
+    "StartProductAgent": {
+      "main": [
+        [
+          {
+            "node": "ResolveProductsWithAgent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ProductAgentModel": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "ResolveProductsWithAgent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "lookup_product_by_code": {
+      "ai_tool": [
+        [
+          {
+            "node": "ResolveProductsWithAgent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_product_by_name": {
+      "ai_tool": [
+        [
+          {
+            "node": "ResolveProductsWithAgent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ProductOutputParser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "ResolveProductsWithAgent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ProductParserFixerModel": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "ProductOutputParser",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ResolveProductsWithAgent": {
+      "main": [
+        [
+          {
+            "node": "LogProductAgentStep",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ReportProductAgentFailure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LogProductAgentStep": {
+      "main": [
+        [
+          {
+            "node": "VerifyProductMatches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "VerifyProductMatches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VerifyProductMatches": {
+      "main": [
+        [
+          {
+            "node": "FinalizeProductValidation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FinalizeProductValidation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [
+    "al-poc",
+    "pg-order-intake",
+    "agent"
+  ]
+}

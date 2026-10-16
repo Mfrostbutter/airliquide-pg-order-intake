@@ -1,0 +1,242 @@
+{
+  "name": "AL PoC: Mock TIBCO ESB (sales order API)",
+  "nodes": [
+    {
+      "id": "03171554-7802-59db-bb7b-f0e9c70255be",
+      "name": "ReceiveSalesOrderPost",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "al-mock-tibco/sales-orders",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "f4b4feb7-b3cc-5d0b-8b6c-392b8dfe6801",
+      "notes": "Stand-in for the TIBCO ESB sales-order endpoint. Body: the payload BuildSalesOrderPayload produces."
+    },
+    {
+      "id": "082c3ce6-73f4-58c8-89ed-8283eafdbb71",
+      "name": "ConsumeChaosBudget",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        208,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with c as (\n  update al_poc.esb_chaos set remaining_failures = remaining_failures - 1, calls = calls + 1\n  where order_id = $1 and remaining_failures > 0\n  returning remaining_failures\n)\nselect exists (select 1 from c) as fail;",
+        "options": {
+          "queryReplacement": "={{ [$json.body.order_id || ''] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "notes": "esb_chaos.remaining_failures > 0 forces a 503 on this call and decrements. Lets a fixture rehearse the backoff loop."
+    },
+    {
+      "id": "e6a5089a-f2a9-5126-be68-30e00563245e",
+      "name": "ShouldFail",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        416,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f46d9367-51e8-567a-b962-8ff0bbc7239e",
+              "leftValue": "={{ $json.fail }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9e104318-c6ec-59a6-a344-7d98570fcfd7",
+      "name": "RespondServiceUnavailable",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        624,
+        272
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'ESB temporarily unavailable', code: 'ESB_503' }) }}",
+        "options": {
+          "responseCode": 503
+        }
+      }
+    },
+    {
+      "id": "407afdce-35ae-5f36-8b86-72dbae79dc94",
+      "name": "CreateSapSalesOrder",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        624,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into al_poc.sales_orders (order_id, sap_order_number, payload)\nvalues ($1, $2, $3::jsonb)\non conflict (order_id) do update set payload = excluded.payload\nreturning order_id, sap_order_number;",
+        "options": {
+          "queryReplacement": "={{ [$('ReceiveSalesOrderPost').first().json.body.order_id, '00' + String(Date.now()).slice(-8), JSON.stringify($('ReceiveSalesOrderPost').first().json.body)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "notes": "SAP S/4HANA stand-in. Idempotent on order_id: a retried post returns the same SAP number."
+    },
+    {
+      "id": "2d5f2127-93c8-5777-bc2d-e67a78ad9692",
+      "name": "RespondCreated",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        832,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'created', order_id: $json.order_id, sap_order_number: $json.sap_order_number }) }}",
+        "options": {
+          "responseCode": 201
+        }
+      }
+    },
+    {
+      "id": "3e05a16e-91fd-5ecf-b3ca-e655f8419f90",
+      "name": "RespondInternalError",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        832,
+        272
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'mock ESB failure', detail: String($json.error?.message || $json.error || '') }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    }
+  ],
+  "connections": {
+    "ReceiveSalesOrderPost": {
+      "main": [
+        [
+          {
+            "node": "ConsumeChaosBudget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ConsumeChaosBudget": {
+      "main": [
+        [
+          {
+            "node": "ShouldFail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RespondInternalError",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ShouldFail": {
+      "main": [
+        [
+          {
+            "node": "RespondServiceUnavailable",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CreateSapSalesOrder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CreateSapSalesOrder": {
+      "main": [
+        [
+          {
+            "node": "RespondCreated",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RespondInternalError",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [
+    "al-poc",
+    "pg-order-intake",
+    "lab-stand-in"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "gutter": 16,
+  "zones": [
+    {"title": "1. Shipping Agent", "color": 5,
+     "body": "Called with the sender email, the customer name and the delivery address as written. Tools: find the Sold-To by email, list its Ship-To partner roles, read the plant cut-off (OCB). Structured output only; codes must come from a tool result.",
+     "nodes": ["StartShippingAgent", "ResolveShipToWithAgent", "ShippingAgentModel", "find_account_by_email", "list_ship_to_for_account", "get_cutoff", "ShippingOutputParser", "ShippingParserFixerModel", "ReportShippingAgentFailure"]},
+    {"title": "2. Deterministic verify and log", "color": 3,
+     "body": "The chosen Ship-To must be a partner of the chosen Sold-To, re-read from the table. The cut-off is evaluated in the plant's time zone and the earliest dispatch date computed. Tool calls go to step_log.",
+     "nodes": ["VerifyShipTo", "LogShippingAgentStep", "FinalizeShippingValidation"]}
+  ]
+}

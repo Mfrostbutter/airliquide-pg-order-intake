@@ -1,0 +1,8 @@
+{
+  "gutter": 16,
+  "zones": [
+    {"title": "Mock TIBCO ESB: POST /sales-orders", "color": 7,
+     "body": "Lab stand-in for the ESB endpoint that creates the SAP sales order. If esb_chaos has remaining failures for this order it answers 503 and decrements, so a fixture can rehearse the intake workflow's exponential backoff. Otherwise it records the order and answers 201 with a SAP number, idempotent on order_id.",
+     "nodes": ["ReceiveSalesOrderPost", "ConsumeChaosBudget", "ShouldFail", "RespondServiceUnavailable", "CreateSapSalesOrder", "RespondCreated", "RespondInternalError"]}
+  ]
+}

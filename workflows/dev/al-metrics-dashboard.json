@@ -1,0 +1,186 @@
+{
+  "name": "AL PoC: Metrics dashboard (order intake)",
+  "nodes": [
+    {
+      "id": "893e787e-0a89-5ed5-bcb7-ad869eb7f311",
+      "name": "ReceiveDashboardRequest",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "al-pg-order-metrics",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "e3efa1d1-9b39-50f2-b557-85e364122634"
+    },
+    {
+      "id": "9a750031-b2b0-5d19-9f9a-5a1ff236b474",
+      "name": "ReadMetrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        208,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from al_poc.metrics;",
+        "options": {
+          "queryReplacement": ""
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "bbb81aa7-af79-52c6-a9df-8a50981704e4",
+      "name": "ReadRecentOrders",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        416,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select o.order_id, o.intent, o.decision, o.status, o.confidence, o.sap_order_number, o.started_at,\n  extract(epoch from (o.finished_at - o.started_at))::int as seconds,\n  (select count(*) from al_poc.step_log s where s.order_id = o.order_id) as steps\nfrom al_poc.order_intake o order by o.started_at desc limit 25;",
+        "options": {
+          "queryReplacement": ""
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "ce94d203-4ca1-5bfd-b2d4-6d2214248daa",
+      "name": "RenderDashboard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const m = $('ReadMetrics').first().json || {};\nconst rows = $input.all().map(i => i.json);\nconst esc = s => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));\nconst tile = (label, value, unit = '') => `<div class=\"tile\"><div class=\"v\">${esc(value ?? '-')}<span class=\"u\">${unit}</span></div><div class=\"l\">${label}</div></div>`;\nconst tr = rows.map(r => `<tr><td>${esc(r.order_id)}</td><td>${esc(r.intent)}</td><td class=\"${esc(r.decision)}\">${esc(r.decision || '-')}</td><td>${esc(r.status)}</td><td>${esc(r.confidence)}</td><td>${esc(r.seconds ?? '-')}</td><td>${esc(r.sap_order_number || '')}</td><td>${esc(r.steps)}</td><td>${esc(String(r.started_at).slice(0, 19).replace('T', ' '))}</td></tr>`).join('');\nconst html = `<!doctype html><html><head><meta charset=\"utf-8\"><title>PG Order Intake, PoC metrics</title>\n<meta http-equiv=\"refresh\" content=\"15\">\n<style>body{font-family:Arial,sans-serif;margin:24px;color:#1d1d1f;background:#fafafa}h1{font-size:20px}.tiles{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0 24px}\n.tile{background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:14px 18px;min-width:150px}.v{font-size:28px;font-weight:bold}.u{font-size:14px;color:#777;margin-left:4px}.l{font-size:12px;color:#666;margin-top:4px}\ntable{border-collapse:collapse;background:#fff;font-size:13px}th,td{border:1px solid #e5e5e5;padding:6px 10px;text-align:left}th{background:#f3f3f3}\ntd.auto{color:#1a7f37;font-weight:bold}td.draft{color:#b45309;font-weight:bold}td.skip{color:#777}.note{color:#666;font-size:12px}</style></head><body>\n<h1>PG Order Intake, PoC metrics</h1>\n<div class=\"tiles\">${tile('orders received', m.orders_total)}${tile('automation rate', m.automation_rate_pct, '%')}${tile('auto posted', m.auto_posted)}${tile('sent to order desk', m.sent_to_review)}${tile('failed', m.failed)}${tile('avg end-to-end (auto)', m.avg_auto_seconds, 's')}${tile('avg AI confidence', m.avg_confidence)}</div>\n<table><tr><th>Order</th><th>Intent</th><th>Decision</th><th>Status</th><th>Confidence</th><th>Seconds</th><th>SAP order</th><th>Logged steps</th><th>Started</th></tr>${tr || '<tr><td colspan=9>no orders yet</td></tr>'}</table>\n<p class=\"note\">Refreshes every 15 s from al_poc.order_intake and step_log. Targets from the RFP: under 5 minutes per order, over 80% automation on simple orders, critical fields at 1.0, reasoning confidence at or above 0.7.</p>\n</body></html>`;\nreturn [{ json: { html } }];"
+      }
+    },
+    {
+      "id": "34ca45bd-ab19-50a8-bd24-7d153e3e9772",
+      "name": "RespondHtml",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        832,
+        0
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "ReceiveDashboardRequest": {
+      "main": [
+        [
+          {
+            "node": "ReadMetrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ReadMetrics": {
+      "main": [
+        [
+          {
+            "node": "ReadRecentOrders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ReadRecentOrders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ReadRecentOrders": {
+      "main": [
+        [
+          {
+            "node": "RenderDashboard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RenderDashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RenderDashboard": {
+      "main": [
+        [
+          {
+            "node": "RespondHtml",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [
+    "al-poc",
+    "pg-order-intake",
+    "monitoring"
+  ]
+}

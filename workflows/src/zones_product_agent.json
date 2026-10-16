@@ -1,0 +1,11 @@
+{
+  "gutter": 16,
+  "zones": [
+    {"title": "1. Product Agent", "color": 5,
+     "body": "Called by the intake workflow with the order id and the extracted lines. The agent may only use the two catalogue tools and must return the structured shape; a hallucinated code cannot be returned because the parser schema and the verify step below both reject it.",
+     "nodes": ["StartProductAgent", "ResolveProductsWithAgent", "ProductAgentModel", "lookup_product_by_code", "search_product_by_name", "ProductOutputParser", "ProductParserFixerModel", "ReportProductAgentFailure"]},
+    {"title": "2. Deterministic verify and log", "color": 3,
+     "body": "Every code the agent chose is re-read from the catalogue. Lines are marked verified, ambiguous, not_found or unverified_code; quantities over 80 are flagged as Elephant Order. The tool calls are written to step_log as the agent's reflection trace.",
+     "nodes": ["VerifyProductMatches", "LogProductAgentStep", "FinalizeProductValidation"]}
+  ]
+}

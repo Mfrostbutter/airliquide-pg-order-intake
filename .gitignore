@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Customer data. Directory is tracked, contents are not.
+data/*
+!data/.gitkeep
+
+# Exports that may carry credential values
+credentials*.json
+*-credentials.json
+exports/
+
+# Credential id ledgers are instance-local. The workflow id map is tracked.
+deploy/creds.*.json
+
+# Scratch
+.tmp/
+*.log
+
+# Personal Claude Code settings
+.claude/settings.local.json

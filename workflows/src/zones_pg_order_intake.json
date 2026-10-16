@@ -1,0 +1,33 @@
+{
+  "gutter": 16,
+  "zones": [
+    {"title": "1. Notify, then pull", "color": 4,
+     "body": "A Pub/Sub push lands here and is acknowledged at once; it carries only a pointer. The email and its attachments are pulled from the mailbox afterwards (Gmail API in production), and the order record is opened. No large payload ever rides on the notification.",
+     "nodes": ["ReceivePubSubNotification", "DecodeNotification", "PullEmailFromMailbox", "OpenOrderRecord"]},
+    {"title": "2. Read the attachment", "color": 4,
+     "body": "The first attachment is routed by type: PDF text, XLSX or CSV rows (flattened to text), or none. Everything is joined with the email body into one document. DOCX and scans go to Document AI on the customer instance.",
+     "nodes": ["PrepareDocument", "RouteByAttachmentType", "ExtractPdfText", "ExtractXlsxRows", "ExtractCsvRows", "TabularToText", "AssembleDocument"]},
+    {"title": "3. Zero-shot extraction", "color": 5,
+     "body": "The Information Extractor reads the document against a fixed schema: intent, customer, Ship-To as written, product lines, empty cylinder returns, reasoning and confidence. No templates, no training. Non-orders stop after the log.",
+     "nodes": ["ExtractOrderWithAi", "ExtractorModel", "LogExtractionStep", "SaveExtraction", "IsOrderIntent", "MarkNotAnOrder"]},
+    {"title": "4. Specialist agents", "color": 5,
+     "body": "Two sub-workflow agents validate against Salesforce (lab: Postgres). The Product Agent resolves every line to exactly one catalogue code; the Shipping Agent resolves Sold-To, Ship-To and the plant cut-off. Each agent's tool calls are logged as reflection steps.",
+     "nodes": ["RunProductAgent", "RunShippingAgent"]},
+    {"title": "5. Deterministic gate", "color": 3,
+     "body": "Code, not a model, decides. Critical rules (intent, account, every product code, Ship-To, quantities) must all pass. Review rules: Elephant Order over 80, empty cylinder returns, confidence under 0.7. Cut-off is informational. The decision and every rule result are saved.",
+     "nodes": ["ApplyBusinessRules", "SaveValidation", "LogDecisionStep"]},
+    {"title": "6. Order desk (HITL)", "color": 6,
+     "body": "Auto goes straight to posting. Anything else becomes a pre-filled Draft Order with an AI-written note (fixed reason wording from the gate) and the order desk gets Approve / Reject links. The execution sleeps on the Wait node until they click.",
+     "nodes": ["IsAutoDecision", "WriteDraftExplanation", "ExplanationModel", "CreateDraftOrder", "LinkDraftToOrder", "NotifyOrderDesk", "WaitForOrderDesk", "OrderDeskApproved", "MarkRejected"]},
+    {"title": "7. Post to SAP through the ESB", "color": 3,
+     "body": "One sales-order call to the TIBCO endpoint (lab: mock). On a 5xx the loop waits 4, 8, 16, 32, 64 s between attempts, five retries over about two minutes, each one logged. After the fifth failure the validated order is escalated to the order desk and marked failed.",
+     "nodes": ["BuildSalesOrderPayload", "PostSalesOrderToEsb", "RecordSalesOrder", "LogPostedStep", "ComputeBackoff", "LogRetryStep", "HasRetriesLeft", "WaitBackoff", "EscalateEsbFailure", "MarkFailed"]},
+    {"title": "8. Failures", "color": 7,
+     "body": "Every fallible node routes its error output here. Ops gets the error, the order id and the execution id. Nothing is posted on a failure.",
+     "nodes": ["NotifyOpsFailure"]}
+  ],
+  "panels": [
+    {"title": "PG Order Intake, PoC", "color": 6, "width": 720,
+     "body": "Air Liquide RFP PoC, order-to-cash intake. Email in, SAP sales order or Salesforce Draft Order out, under five minutes.\n\nLab stand-ins: Postgres al_poc plays Gmail (mailbox), Salesforce (accounts, partner_roles, product_catalog, draft_orders), the OCB cut-off API (cut_offs) and SAP (sales_orders). The mock TIBCO workflow is the ESB. LM Studio plays Gemini. Mailpit is the order desk inbox. Dashboard: /webhook/al-pg-order-metrics.\n\nTest: python3 scripts/send-fixture.py data/fixtures/<fixture>.json [--chaos N]"}
+  ]
+}

@@ -1,0 +1,448 @@
+{
+  "name": "AL PoC: Shipping Agent (resolve Ship-To and cut-off)",
+  "nodes": [
+    {
+      "id": "5585f7d3-f20d-5378-b330-ed6924896604",
+      "name": "StartShippingAgent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "order_id",
+              "type": "string"
+            },
+            {
+              "name": "sender_email",
+              "type": "string"
+            },
+            {
+              "name": "customer_name",
+              "type": "string"
+            },
+            {
+              "name": "sold_to_hint",
+              "type": "string"
+            },
+            {
+              "name": "ship_to",
+              "type": "object"
+            },
+            {
+              "name": "requested_delivery_date",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "notes": "Inputs: order_id, sender_email, customer_name, sold_to_hint, ship_to = {code, name, street, city, postal_code, country}, requested_delivery_date"
+    },
+    {
+      "id": "c81597d0-9b28-5ff5-8d76-a616d8deee4c",
+      "name": "ResolveShipToWithAgent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Order {{ $json.order_id }}.\nSender email: {{ $json.sender_email }}\nCustomer name in the email: {{ $json.customer_name }}\nCustomer number mentioned (may be empty): {{ $json.sold_to_hint }}\nDelivery address as written: {{ JSON.stringify($json.ship_to || {}) }}\nRequested delivery date: {{ $json.requested_delivery_date || 'not given' }}\nToday is {{ $now.toFormat('yyyy-LL-dd') }}.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are the Shipping Agent for Air Liquide packaged-gas order intake. Identify the customer account (Sold-To) and the delivery address (Ship-To) for one order, using only the tools. Steps: (1) call find_account_by_email with the sender email; if it returns no account, answer match=not_found. (2) call list_ship_to_for_account with the sold_to_code and compare the customer's delivery address and Ship-To code against the rows: street, city, postal code, or an explicit Ship-To code. (3) call get_cutoff with the account's sales_org and plant. 'exact' means the customer gave a Ship-To code or an address that matches one row unambiguously; 'resolved' means one row matches on city plus street or name; 'ambiguous' means two or more rows could match (list them in candidates); 'not_found' means no row matches. Never invent codes: sold_to_code and ship_to_code must be values a tool returned, or empty strings. Return the JSON the output format requires and nothing else.",
+          "maxIterations": 20,
+          "returnIntermediateSteps": true
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "eb5cd601-5d86-5eaf-9691-9c4fb026eee7",
+      "name": "ShippingAgentModel",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        272
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "qwen/qwen3-coder-30b"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "baseURL": "http://host.docker.internal:1234/v1",
+          "temperature": 0.1,
+          "maxTokens": 4096
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "MBlabLmStudio001",
+          "name": "LM Studio (lab)"
+        }
+      },
+      "notes": "Lab model. Customer instance: Gemini on Air Liquide's own API key or Vertex AI, by replacing this sub-node."
+    },
+    {
+      "id": "3e36ef47-24bf-5bb4-9667-97271b07df01",
+      "name": "find_account_by_email",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.7,
+      "position": [
+        208,
+        272
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Find the customer account (Sold-To) from the sender's email address. Matches the contact email or the email domain. Returns sold_to_code, name, email_domain, contact_email, sales_org, plant; no rows when unknown.",
+        "operation": "executeQuery",
+        "query": "select sold_to_code, name, email_domain, contact_email, sales_org, plant from al_poc.accounts\nwhere lower(contact_email) = lower($1) or lower(email_domain) = lower(split_part($1, '@', 2));",
+        "options": {
+          "queryReplacement": "={{ $fromAI('email', 'Sender email address exactly as given', 'string') }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      }
+    },
+    {
+      "id": "2ed6db72-670f-5c1e-a675-5c02558acf1c",
+      "name": "list_ship_to_for_account",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.7,
+      "position": [
+        416,
+        272
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "List the delivery addresses (Ship-To partner roles) allowed for a Sold-To account. Returns ship_to_code, name, street, city, postal_code, country for each.",
+        "operation": "executeQuery",
+        "query": "select ship_to_code, name, street, city, postal_code, country from al_poc.partner_roles\nwhere sold_to_code = $1 and role = 'SH' order by ship_to_code;",
+        "options": {
+          "queryReplacement": "={{ $fromAI('sold_to_code', 'The sold_to_code returned by find_account_by_email', 'string') }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      }
+    },
+    {
+      "id": "00f19a0d-e124-5d16-868f-ba39cea25f96",
+      "name": "get_cutoff",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.7,
+      "position": [
+        624,
+        272
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Get the daily order cut-off time for a sales organisation and plant (the Omnichannel Backend rule). Returns cutoff_local_time and tz.",
+        "operation": "executeQuery",
+        "query": "select sales_org, plant, cutoff_local_time::text as cutoff_local_time, tz from al_poc.cut_offs\nwhere sales_org = $1 and plant = $2;",
+        "options": {
+          "queryReplacement": "={{ $fromAI('sales_org', 'sales_org of the account, e.g. FR01', 'string') }},{{ $fromAI('plant', 'plant of the account, e.g. FR07', 'string') }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      }
+    },
+    {
+      "id": "44af2476-adbb-5998-9e05-663eb96c91d0",
+      "name": "ShippingOutputParser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        864,
+        272
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"sold_to_code\": {\n      \"type\": \"string\",\n      \"description\": \"Account sold_to_code returned by find_account_by_email, or empty\"\n    },\n    \"sold_to_name\": {\n      \"type\": \"string\"\n    },\n    \"ship_to_code\": {\n      \"type\": \"string\",\n      \"description\": \"ship_to_code returned by list_ship_to_for_account, or empty\"\n    },\n    \"ship_to_name\": {\n      \"type\": \"string\"\n    },\n    \"match\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"exact\",\n        \"resolved\",\n        \"ambiguous\",\n        \"not_found\"\n      ]\n    },\n    \"candidates\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    },\n    \"sales_org\": {\n      \"type\": \"string\"\n    },\n    \"plant\": {\n      \"type\": \"string\"\n    },\n    \"cutoff_local_time\": {\n      \"type\": \"string\"\n    },\n    \"tz\": {\n      \"type\": \"string\"\n    },\n    \"explanation\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"sold_to_code\",\n    \"ship_to_code\",\n    \"match\",\n    \"explanation\"\n  ]\n}",
+        "autoFix": true
+      }
+    },
+    {
+      "id": "ff400270-a094-58a6-bc7e-b969b4b0e5d3",
+      "name": "ShippingParserFixerModel",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        864,
+        480
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "qwen/qwen3-coder-30b"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "baseURL": "http://host.docker.internal:1234/v1",
+          "temperature": 0.0,
+          "maxTokens": 4096
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "MBlabLmStudio001",
+          "name": "LM Studio (lab)"
+        }
+      },
+      "notes": "Second model call only when the agent's JSON does not match the schema."
+    },
+    {
+      "id": "4145a266-3316-554f-96f7-bb861550dbbc",
+      "name": "VerifyShipTo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        208,
+        640
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select p.sold_to_code, p.ship_to_code, p.name, p.city, a.sales_org, a.plant, c.cutoff_local_time::text as cutoff_local_time, c.tz\nfrom al_poc.partner_roles p\njoin al_poc.accounts a on a.sold_to_code = p.sold_to_code\nleft join al_poc.cut_offs c on c.sales_org = a.sales_org and c.plant = a.plant\nwhere p.sold_to_code = $1 and p.ship_to_code = $2 and p.role = 'SH';",
+        "options": {
+          "queryReplacement": "={{ (o => [String(o.sold_to_code || ''), String(o.ship_to_code || '')])($('ResolveShipToWithAgent').first().json.output || {}) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true,
+      "notes": "Deterministic check: the chosen Ship-To must be a partner role of the chosen Sold-To."
+    },
+    {
+      "id": "d775515a-0e83-5bcd-9d05-f002f3888633",
+      "name": "LogShippingAgentStep",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        0,
+        640
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\nvalues ($1, $2, $3, $4, $5, $6::jsonb)\nreturning id;",
+        "options": {
+          "queryReplacement": "={{ [$('StartShippingAgent').first().json.order_id, $execution.id, 'shipping_agent', 'ShippingAgent', 'Shipping Agent match=' + (($('ResolveShipToWithAgent').first().json.output || {}).match || 'none'), JSON.stringify({ output: $('ResolveShipToWithAgent').first().json.output, steps: ($('ResolveShipToWithAgent').first().json.intermediateSteps || []).map(s => ({ tool: s.action?.tool, input: s.action?.toolInput })) })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "ae4a00e4-2cfa-5353-b8d4-496cc894d1d2",
+      "name": "FinalizeShippingValidation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        640
+      ],
+      "parameters": {
+        "jsCode": "// Deterministic post-check: the Ship-To must be a partner of the Sold-To; cut-off evaluated in the plant's time zone.\nconst agent = $('ResolveShipToWithAgent').first().json;\nconst out = agent.output || {};\nconst row = ($('VerifyShipTo').first().json || {});\nconst verified = !!row.ship_to_code;\nconst tz = out.tz || row.tz || 'Europe/Paris';\nconst cutoff = String(out.cutoff_local_time || row.cutoff_local_time || '').slice(0, 5);\nlet past_cutoff = false, earliest_dispatch_date = null, now_local = null;\ntry {\n  const now = DateTime.now().setZone(tz);\n  now_local = now.toFormat('yyyy-LL-dd HH:mm');\n  if (cutoff) {\n    const [h, m] = cutoff.split(':').map(Number);\n    const c = now.set({ hour: h, minute: m, second: 0, millisecond: 0 });\n    past_cutoff = now > c;\n    let d = now.plus({ days: past_cutoff ? 2 : 1 });\n    while (d.weekday > 5) d = d.plus({ days: 1 });\n    earliest_dispatch_date = d.toFormat('yyyy-LL-dd');\n  }\n} catch (e) { /* leave cut-off fields empty */ }\nconst steps = (agent.intermediateSteps || []).map(s => ({\n  tool: s.action?.tool, input: s.action?.toolInput, observation: String(s.observation ?? '').slice(0, 300),\n}));\nreturn [{ json: {\n  order_id: $('StartShippingAgent').first().json.order_id,\n  agent: 'ShippingAgent',\n  sold_to_code: row.sold_to_code || out.sold_to_code || '', sold_to_name: out.sold_to_name || '',\n  ship_to_code: verified ? row.ship_to_code : '', ship_to_name: verified ? row.name : (out.ship_to_name || ''),\n  ship_to_city: verified ? row.city : '',\n  match: out.match || 'not_found', status: verified && ['exact', 'resolved'].includes(out.match) ? 'verified' : (out.match || 'not_found'),\n  candidates: out.candidates || [],\n  sales_org: out.sales_org || row.sales_org || '', plant: out.plant || row.plant || '',\n  cutoff_local_time: cutoff, tz, now_local, past_cutoff, earliest_dispatch_date,\n  explanation: out.explanation || '',\n  tool_calls: steps.length, trace: steps,\n}}];"
+      }
+    },
+    {
+      "id": "f89634c2-2b46-5711-a166-aaf232542338",
+      "name": "ReportShippingAgentFailure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        480
+      ],
+      "parameters": {
+        "jsCode": "const err = $input.first().json;\nreturn [{ json: {\n  order_id: $('StartShippingAgent').first().json.order_id, agent: 'ShippingAgent', sold_to_code: '', ship_to_code: '',\n  match: 'not_found', status: 'agent_error', candidates: [], past_cutoff: false, earliest_dispatch_date: null,\n  explanation: 'Shipping Agent failed: ' + String(err.error?.message || err.error || 'unknown error'), tool_calls: 0, trace: [], agent_error: true,\n}}];"
+      }
+    }
+  ],
+  "connections": {
+    "StartShippingAgent": {
+      "main": [
+        [
+          {
+            "node": "ResolveShipToWithAgent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ShippingAgentModel": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "ResolveShipToWithAgent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_account_by_email": {
+      "ai_tool": [
+        [
+          {
+            "node": "ResolveShipToWithAgent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "list_ship_to_for_account": {
+      "ai_tool": [
+        [
+          {
+            "node": "ResolveShipToWithAgent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_cutoff": {
+      "ai_tool": [
+        [
+          {
+            "node": "ResolveShipToWithAgent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ShippingOutputParser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "ResolveShipToWithAgent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ShippingParserFixerModel": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "ShippingOutputParser",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ResolveShipToWithAgent": {
+      "main": [
+        [
+          {
+            "node": "LogShippingAgentStep",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ReportShippingAgentFailure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LogShippingAgentStep": {
+      "main": [
+        [
+          {
+            "node": "VerifyShipTo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "VerifyShipTo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VerifyShipTo": {
+      "main": [
+        [
+          {
+            "node": "FinalizeShippingValidation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FinalizeShippingValidation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [
+    "al-poc",
+    "pg-order-intake",
+    "agent"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "gutter": 16,
+  "zones": [
+    {"title": "Metrics dashboard: GET /al-pg-order-metrics", "color": 6,
+     "body": "Serves an HTML page over order_intake and step_log: orders received, automation rate, auto posted, sent to the order desk, failures, average end-to-end seconds, average confidence, and the last 25 orders. Refreshes every 15 s. Production: the same queries feed Looker or Power BI.",
+     "nodes": ["ReceiveDashboardRequest", "ReadMetrics", "ReadRecentOrders", "RenderDashboard", "RespondHtml"]}
+  ]
+}
