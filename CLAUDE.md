@@ -5,6 +5,8 @@ question to ask the customer, not a blank to guess at.
 
 ## Context
 
+- **Notion record:** FDE > Engagements row https://app.notion.com/p/3fb5b6e0c94f813abdaaec701c28c1f2 (created 2026-10-16). Manuel's working page: Customers / Air Liquide / Air Liquide RFP.
+
 - **Customer:** Air Liquide, Group Digital & IT, GDO Automation (Business Process Orchestration & Automation Platform RFP, 2026)
 - **Start date:** 2026-10-16 (lab build). PoC kickoff 2026-10-12, build 2026-10-19 to 2026-11-20 (primary dev week for Frosty: week of 2026-10-26, a few hours a day; Frosty's own target: working solution by 2026-11-15), demo 2026-11-20 (possibly on site in Paris), bidder selection 2026-11-30. Weekly Monday check-ins with Manuel and Morgan. Competitors in the PoC: two unconfirmed, from a field that included UiPath, Appian and ServiceNow. (Sync of 2026-10-16, Notion meeting note.)
 - **Primary contacts:** n8n: Manuel Craciun (AE, bid owner, France), Morgan Lupton (SE, owns phase 1: install and configure the EC2 instance), Madison Seeley (Deployment Strategist, LA, started 2026-10-15; stakeholder management and on-site presentation, builds with Frosty in phase 2), Emmanuel Bommelaer (CSM), Sarah Harrison. Slack channel `int-airliquide`. Air Liquide core PoC team: Emmanuel Delort (Automation Lead), Romain Fassi (PoC Lead), Narayana Ayyagari (Automation Architect), Tristan Schultz (Tech Lead), Raphael Leitao / Luc Ebert (PG Order tech), Vorith Top (SAP API), Moctar Ba (Salesforce API), Karine Fessard / Romain Keime (PMO). Procurement SPOC: Izlan Sulaiman
