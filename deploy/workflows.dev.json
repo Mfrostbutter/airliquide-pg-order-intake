@@ -3,5 +3,6 @@
   "AL PoC: Product Agent (resolve lines against catalog)": "yxP9Kgx9uVyEFiRZ",
   "AL PoC: Shipping Agent (resolve Ship-To and cut-off)": "n5UiTb8wRn3qwZ84",
   "AL PoC: Intake PG order (Pub/Sub to SAP or Draft Order)": "ufx7qhXP8jGqVrus",
-  "AL PoC: Metrics dashboard (order intake)": "nxdYyNbocTuhw0Jk"
+  "AL PoC: Metrics dashboard (order intake)": "nxdYyNbocTuhw0Jk",
+  "AL PoC: LLM telemetry harvester (tokens per call)": "MBBV9UxlINoAJzJb"
 }

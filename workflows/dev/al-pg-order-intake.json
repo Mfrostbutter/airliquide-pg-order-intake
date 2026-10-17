@@ -29,7 +29,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "// Pub/Sub push envelope -> {email_id}. The notification is only a pointer; the payload is pulled next.\nconst j = $input.first().json;\nconst body = j.body || j;\nlet email_id = body.email_id;\nlet message_id = body.message?.messageId || null;\nif (!email_id && body.message?.data) {\n  try { email_id = JSON.parse(Buffer.from(body.message.data, 'base64').toString('utf8')).email_id; } catch (e) { email_id = null; }\n}\nif (!email_id) throw new Error('notification carries no email_id');\nreturn [{ json: { email_id, message_id, order_id: 'ORD-' + email_id, notified_at: new Date().toISOString() } }];"
+        "jsCode": "// Pub/Sub push envelope -> {email_id}. The notification is only a pointer; the payload is pulled next.\nconst j = $input.first().json;\nconst body = j.body || j;\nlet email_id = body.email_id;\nlet message_id = body.message?.messageId || null;\nif (!email_id && body.message?.data) {\n  try { email_id = JSON.parse(Buffer.from(body.message.data, 'base64').toString('utf8')).email_id; } catch (e) { email_id = null; }\n}\nif (!email_id) throw new Error('notification carries no email_id');\ntry { $execution.customData.set('order_id', 'ORD-' + email_id); $execution.customData.set('email_id', String(email_id)); } catch (e) {}\nreturn [{ json: { email_id, message_id, order_id: 'ORD-' + email_id, notified_at: new Date().toISOString() } }];"
       }
     },
     {
@@ -71,9 +71,71 @@
       ],
       "parameters": {
         "operation": "executeQuery",
-        "query": "insert into al_poc.order_intake (order_id, email_id, execution_id, status)\nvalues ($1, $2, $3, 'received')\non conflict (order_id) do update set execution_id = excluded.execution_id, status = 'received', started_at = now(),\n  finished_at = null, decision = null, sap_order_number = null, draft_order_id = null\nreturning order_id, email_id;",
+        "query": "with ins as (\n  insert into al_poc.order_intake (order_id, email_id, execution_id, status)\n  values ($1, $2, $3, 'received')\n  on conflict (order_id) do nothing\n  returning order_id, email_id, status\n)\nselect order_id, email_id, true as is_new, status from ins\nunion all\nselect o.order_id, o.email_id, false as is_new, o.status from al_poc.order_intake o\nwhere o.order_id = $1 and not exists (select 1 from ins);",
         "options": {
           "queryReplacement": "={{ ['ORD-' + $json.email_id, $json.email_id, $execution.id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "notes": "Idempotent on order_id: Pub/Sub delivers at least once, so a redelivered notification must not reprocess an order."
+    },
+    {
+      "id": "9b7cd36d-c333-5412-9ae7-691b1fd4053f",
+      "name": "IsNewNotification",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        832,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ccb67e60-80f5-57df-b32b-ed1f36134ca4",
+              "leftValue": "={{ $json.is_new }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "de7259d8-b33f-5c37-83b3-cdbdd174d9d3",
+      "name": "LogDuplicateNotification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1040,
+        272
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\nvalues ($1, $2, $3, $4, $5, $6::jsonb)\nreturning id;",
+        "options": {
+          "queryReplacement": "={{ [$json.order_id, $execution.id, 'duplicate_notification', 'Intake', 'Duplicate notification ignored; order is ' + $json.status, JSON.stringify({ status: $json.status, message_id: $('DecodeNotification').first().json.message_id })] }}"
         }
       },
       "credentials": {
@@ -94,7 +156,7 @@
       "typeVersion": 2,
       "position": [
         0,
-        592
+        672
       ],
       "parameters": {
         "jsCode": "// One item per email: the envelope plus the first attachment as binary, tagged by kind.\n// PoC scope: one attachment per email. Multi-attachment emails loop over this stage in the next iteration.\nconst mail = $('PullEmailFromMailbox').first().json;\nconst order = $('OpenOrderRecord').first().json;\nconst atts = Array.isArray(mail.attachments) ? mail.attachments : [];\nconst a = atts[0];\nconst kindOf = (name, mime) => {\n  const n = String(name || '').toLowerCase(), m = String(mime || '').toLowerCase();\n  if (n.endsWith('.pdf') || m.includes('pdf')) return 'pdf';\n  if (n.endsWith('.xlsx') || n.endsWith('.xls') || m.includes('spreadsheet') || m.includes('excel')) return 'xlsx';\n  if (n.endsWith('.csv') || m.includes('csv')) return 'csv';\n  if (n.endsWith('.docx') || m.includes('wordprocessingml')) return 'docx';\n  return 'other';\n};\nconst json = {\n  order_id: order.order_id, email_id: mail.email_id, from: mail.from_addr, subject: mail.subject,\n  body_text: mail.body_text, received_at: mail.received_at,\n  attachment_count: atts.length, attachment_name: a ? a.name : '', attachment_kind: a ? kindOf(a.name, a.mime) : 'none',\n};\nconst binary = {};\nif (a) binary.attachment = { data: a.base64, mimeType: a.mime || 'application/octet-stream', fileName: a.name };\nreturn [{ json, binary }];"
@@ -107,7 +169,7 @@
       "typeVersion": 3.4,
       "position": [
         208,
-        592
+        672
       ],
       "parameters": {
         "mode": "rules",
@@ -200,7 +262,7 @@
       "typeVersion": 1.1,
       "position": [
         416,
-        592
+        672
       ],
       "parameters": {
         "operation": "pdf",
@@ -218,7 +280,7 @@
       "typeVersion": 1.1,
       "position": [
         416,
-        800
+        880
       ],
       "parameters": {
         "operation": "xlsx",
@@ -236,7 +298,7 @@
       "typeVersion": 1.1,
       "position": [
         416,
-        1008
+        1088
       ],
       "parameters": {
         "operation": "csv",
@@ -254,7 +316,7 @@
       "typeVersion": 2,
       "position": [
         624,
-        800
+        880
       ],
       "parameters": {
         "jsCode": "// Rows from Extract from File (xlsx or csv) -> one pipe-separated text block.\nconst rows = $input.all().map(i => i.json);\nconst text = rows.map(r => Object.values(r).map(v => String(v ?? '').trim()).filter(Boolean).join(' | ')).filter(Boolean).join('\\n');\nreturn [{ json: { table_text: text, row_count: rows.length } }];"
@@ -267,7 +329,7 @@
       "typeVersion": 2,
       "position": [
         832,
-        592
+        672
       ],
       "parameters": {
         "jsCode": "// Email body plus whatever the attachment branch produced -> one document for the extractor.\nconst env = $('PrepareDocument').first().json;\nconst j = $input.first().json || {};\nconst attText = j.text || j.table_text || '';\nconst unsupported = ['docx', 'other'].includes(env.attachment_kind);\nconst document_text = [\n  `EMAIL FROM: ${env.from}`, `SUBJECT: ${env.subject}`, `RECEIVED: ${env.received_at}`, '',\n  '--- EMAIL BODY ---', env.body_text || '(empty)',\n  attText ? `\\n--- ATTACHMENT (${env.attachment_name}) ---\\n${attText}` : '',\n  unsupported ? `\\n--- ATTACHMENT (${env.attachment_name}) could not be read: ${env.attachment_kind} is not parsed in the PoC ---` : '',\n].join('\\n');\nreturn [{ json: { ...env, document_text, attachment_text_chars: attText.length, attachment_unsupported: unsupported } }];"
@@ -280,7 +342,7 @@
       "typeVersion": 1.2,
       "position": [
         0,
-        1184
+        1600
       ],
       "parameters": {
         "text": "={{ $json.document_text }}",
@@ -302,7 +364,7 @@
       "typeVersion": 1.3,
       "position": [
         0,
-        1456
+        1872
       ],
       "parameters": {
         "model": {
@@ -332,7 +394,7 @@
       "typeVersion": 2.7,
       "position": [
         240,
-        1184
+        1600
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -350,8 +412,7 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "onError": "continueErrorOutput",
-      "alwaysOutputData": true
+      "onError": "continueErrorOutput"
     },
     {
       "id": "9030deb8-a951-57a4-b34e-ae0e492751e4",
@@ -360,7 +421,7 @@
       "typeVersion": 2.7,
       "position": [
         448,
-        1184
+        1600
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -387,7 +448,7 @@
       "typeVersion": 2.3,
       "position": [
         656,
-        1184
+        1600
       ],
       "parameters": {
         "conditions": {
@@ -420,7 +481,7 @@
       "typeVersion": 2.7,
       "position": [
         864,
-        1456
+        1872
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -447,8 +508,8 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        864,
-        1184
+        1120,
+        1600
       ],
       "parameters": {
         "workflowId": {
@@ -500,8 +561,8 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        1072,
-        1184
+        1328,
+        1600
       ],
       "parameters": {
         "workflowId": {
@@ -594,10 +655,10 @@
       "typeVersion": 2,
       "position": [
         0,
-        1920
+        2336
       ],
       "parameters": {
-        "jsCode": "// Deterministic gate. Critical rules must all be 1.0; review rules decide auto vs Draft Order.\nconst AUTO_CONFIDENCE_MIN = 0.7;\nconst ELEPHANT_QTY = 80;\nconst env = $('AssembleDocument').first().json;\nconst ex = $('ExtractOrderWithAi').first().json.output || {};\nconst prod = $('RunProductAgent').first().json || {};\nconst ship = $('RunShippingAgent').first().json || {};\nconst MSG = {\n  product: 'The product code identified by the AI is not found in the Salesforce product catalog',\n  ambiguous_product: 'The product description matches more than one catalog reference',\n  ship_to: 'The delivery address does not match a Ship-To partner of this Sold-To account',\n  ambiguous_ship_to: 'Several Ship-To addresses match the delivery address given by the customer',\n  account: 'The sender could not be matched to a customer account (Sold-To)',\n  elephant: `Elephant Order: a line quantity exceeds ${ELEPHANT_QTY}`,\n  returns: 'Empty cylinder return requested: local handling required',\n  confidence: `AI confidence below ${AUTO_CONFIDENCE_MIN}`,\n  quantity: 'A line has no usable quantity',\n  intent: 'The email was not classified as an order',\n  agent: 'A validation agent failed to answer',\n};\nconst rules = [];\nconst add = (id, name, pass, detail, critical, message) => rules.push({ id, name, pass: !!pass, detail, critical, message: pass ? null : message });\n\nconst lines = prod.lines || [];\nadd('C1', 'Intent is order', ex.intent === 'order', `intent=${ex.intent}`, true, MSG.intent);\nadd('C2', 'Sender matched to a Sold-To account', !!ship.sold_to_code, ship.sold_to_code ? `sold_to ${ship.sold_to_code}` : (ship.explanation || 'no account'), true, MSG.account);\nadd('C3', 'Every product line verified in the catalogue', lines.length > 0 && lines.every(l => l.status === 'verified'),\n  lines.map(l => `${l.input_text} -> ${l.product_code || l.status}`).join('; ') || 'no lines', true,\n  lines.some(l => l.status === 'ambiguous') ? MSG.ambiguous_product : MSG.product);\nadd('C4', 'Ship-To verified as a partner of the Sold-To', ship.status === 'verified', ship.ship_to_code ? `ship_to ${ship.ship_to_code} (${ship.match})` : (ship.explanation || 'none'), true,\n  ship.match === 'ambiguous' ? MSG.ambiguous_ship_to : MSG.ship_to);\nadd('C5', 'Quantities are positive integers', lines.length > 0 && lines.every(l => Number.isInteger(Number(l.quantity)) && Number(l.quantity) > 0),\n  lines.map(l => `${l.product_code || l.input_text}: ${l.quantity}`).join('; '), true, MSG.quantity);\nadd('C6', 'Validation agents answered', !prod.agent_error && !ship.agent_error && !prod.error && !ship.error,\n  (prod.summary || prod.error?.message || '') + ' ' + (ship.explanation || ship.error?.message || ''), true, MSG.agent);\nadd('R7', `No Elephant Order (qty <= ${ELEPHANT_QTY})`, !(prod.elephant_lines || []).length, (prod.elephant_lines || []).join('; ') || 'OK', false, MSG.elephant);\nadd('R8', 'No empty cylinder returns', !(ex.empty_bottle_returns || []).length, (ex.empty_bottle_returns || []).map(r => `${r.quantity} x ${r.product_text}`).join('; ') || 'none', false, MSG.returns);\nadd('R9', `AI confidence >= ${AUTO_CONFIDENCE_MIN}`, Number(ex.confidence) >= AUTO_CONFIDENCE_MIN, `confidence=${ex.confidence}`, false, MSG.confidence);\nconst cutoffNote = ship.cutoff_local_time\n  ? `${ship.past_cutoff ? 'Past' : 'Before'} the ${ship.cutoff_local_time} ${ship.tz} cut-off (local ${ship.now_local}); earliest dispatch ${ship.earliest_dispatch_date}`\n  : 'no cut-off rule found';\nrules.push({ id: 'I10', name: 'Cut-off (informational)', pass: true, detail: cutoffNote, critical: false, message: null });\n\nconst critical_match = rules.filter(r => r.critical).every(r => r.pass);\nconst review_flags = rules.filter(r => !r.critical && !r.pass);\nconst decision = critical_match && review_flags.length === 0 ? 'auto' : 'draft';\nconst reasons = rules.filter(r => !r.pass).map(r => r.message);\nreturn [{ json: {\n  order_id: env.order_id, email_id: env.email_id, decision, critical_match, confidence: Number(ex.confidence) || 0,\n  rules, reasons, cutoff: { past_cutoff: !!ship.past_cutoff, earliest_dispatch_date: ship.earliest_dispatch_date || null, note: cutoffNote },\n  order: {\n    sold_to_code: ship.sold_to_code || '', sold_to_name: ship.sold_to_name || ex.customer_name || '',\n    ship_to_code: ship.ship_to_code || '', ship_to_name: ship.ship_to_name || '',\n    requested_delivery_date: ex.requested_delivery_date || '',\n    lines: lines.map(l => ({ line_no: l.line_no, product_code: l.product_code, product_name: l.product_name, quantity: l.quantity, unit: l.unit, status: l.status, input_text: l.input_text })),\n    empty_bottle_returns: ex.empty_bottle_returns || [],\n    customer_email: ex.customer_email || env.from, notes: ex.notes || '',\n  },\n  product_validation: prod, shipping_validation: ship,\n}}];"
+        "jsCode": "// Deterministic gate. Critical rules must all be 1.0; review rules decide auto vs Draft Order.\nconst V = (k, d) => { try { const v = $vars[k]; return v === undefined || v === null || v === '' ? d : Number(v); } catch (e) { return d; } };\nconst AUTO_CONFIDENCE_MIN = V('AL_PG_AUTO_CONFIDENCE_MIN', 0.7);\nconst ELEPHANT_QTY = V('AL_PG_ELEPHANT_QTY', 80);\nconst env = $('AssembleDocument').first().json;\nconst ex = $('ExtractOrderWithAi').first().json.output || {};\nconst prod = $('RunProductAgent').first().json || {};\nconst ship = $('RunShippingAgent').first().json || {};\nconst MSG = {\n  product: 'The product code identified by the AI is not found in the Salesforce product catalog',\n  ambiguous_product: 'The product description matches more than one catalog reference',\n  ship_to: 'The delivery address does not match a Ship-To partner of this Sold-To account',\n  ambiguous_ship_to: 'Several Ship-To addresses match the delivery address given by the customer',\n  account: 'The sender could not be matched to a customer account (Sold-To)',\n  elephant: `Elephant Order: a line quantity exceeds ${ELEPHANT_QTY}`,\n  returns: 'Empty cylinder return requested: local handling required',\n  confidence: `AI confidence below ${AUTO_CONFIDENCE_MIN}`,\n  quantity: 'A line has no usable quantity',\n  intent: 'The email was not classified as an order',\n  agent: 'A validation agent failed to answer',\n};\nconst rules = [];\nconst add = (id, name, pass, detail, critical, message) => rules.push({ id, name, pass: !!pass, detail, critical, message: pass ? null : message });\n\nconst lines = prod.lines || [];\nadd('C1', 'Intent is order', ex.intent === 'order', `intent=${ex.intent}`, true, MSG.intent);\nadd('C2', 'Sender matched to a Sold-To account', !!ship.sold_to_code, ship.sold_to_code ? `sold_to ${ship.sold_to_code}` : (ship.explanation || 'no account'), true, MSG.account);\nadd('C3', 'Every product line verified in the catalogue', lines.length > 0 && lines.every(l => l.status === 'verified'),\n  lines.map(l => `${l.input_text} -> ${l.product_code || l.status}`).join('; ') || 'no lines', true,\n  lines.some(l => l.status === 'ambiguous') ? MSG.ambiguous_product : MSG.product);\nadd('C4', 'Ship-To verified as a partner of the Sold-To', ship.status === 'verified', ship.ship_to_code ? `ship_to ${ship.ship_to_code} (${ship.match})` : (ship.explanation || 'none'), true,\n  ship.match === 'ambiguous' ? MSG.ambiguous_ship_to : MSG.ship_to);\nadd('C5', 'Quantities are positive integers', lines.length > 0 && lines.every(l => Number.isInteger(Number(l.quantity)) && Number(l.quantity) > 0),\n  lines.map(l => `${l.product_code || l.input_text}: ${l.quantity}`).join('; '), true, MSG.quantity);\nadd('C6', 'Validation agents answered', !prod.agent_error && !ship.agent_error && !prod.error && !ship.error,\n  (prod.summary || prod.error?.message || '') + ' ' + (ship.explanation || ship.error?.message || ''), true, MSG.agent);\nadd('R7', `No Elephant Order (qty <= ${ELEPHANT_QTY})`, !(prod.elephant_lines || []).length, (prod.elephant_lines || []).join('; ') || 'OK', false, MSG.elephant);\nadd('R8', 'No empty cylinder returns', !(ex.empty_bottle_returns || []).length, (ex.empty_bottle_returns || []).map(r => `${r.quantity} x ${r.product_text}`).join('; ') || 'none', false, MSG.returns);\nadd('R9', `AI confidence >= ${AUTO_CONFIDENCE_MIN}`, Number(ex.confidence) >= AUTO_CONFIDENCE_MIN, `confidence=${ex.confidence}`, false, MSG.confidence);\nconst cutoffNote = ship.cutoff_local_time\n  ? `${ship.past_cutoff ? 'Past' : 'Before'} the ${ship.cutoff_local_time} ${ship.tz} cut-off (local ${ship.now_local}); earliest dispatch ${ship.earliest_dispatch_date}`\n  : 'no cut-off rule found';\nrules.push({ id: 'I10', name: 'Cut-off (informational)', pass: true, detail: cutoffNote, critical: false, message: null });\n\nconst critical_match = rules.filter(r => r.critical).every(r => r.pass);\nconst review_flags = rules.filter(r => !r.critical && !r.pass);\nconst decision = critical_match && review_flags.length === 0 ? 'auto' : 'draft';\nconst reasons = rules.filter(r => !r.pass).map(r => r.message);\nreturn [{ json: {\n  order_id: env.order_id, email_id: env.email_id, decision, critical_match, confidence: Number(ex.confidence) || 0,\n  rules, reasons, cutoff: { past_cutoff: !!ship.past_cutoff, earliest_dispatch_date: ship.earliest_dispatch_date || null, note: cutoffNote },\n  order: {\n    sold_to_code: ship.sold_to_code || '', sold_to_name: ship.sold_to_name || ex.customer_name || '',\n    ship_to_code: ship.ship_to_code || '', ship_to_name: ship.ship_to_name || '',\n    requested_delivery_date: ex.requested_delivery_date || '',\n    lines: lines.map(l => ({ line_no: l.line_no, product_code: l.product_code, product_name: l.product_name, quantity: l.quantity, unit: l.unit, status: l.status, input_text: l.input_text })),\n    empty_bottle_returns: ex.empty_bottle_returns || [],\n    customer_email: ex.customer_email || env.from, notes: ex.notes || '',\n  },\n  product_validation: prod, shipping_validation: ship,\n}}];"
       }
     },
     {
@@ -607,7 +668,7 @@
       "typeVersion": 2.7,
       "position": [
         208,
-        1920
+        2336
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -634,7 +695,7 @@
       "typeVersion": 2.7,
       "position": [
         416,
-        1920
+        2336
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -652,8 +713,35 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "6aaefdbd-2973-5b0f-b809-42674d90590f",
+      "name": "LogGuardEvents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        624,
+        2336
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with ev as (select * from jsonb_to_recordset($2::jsonb) as e(agent text, kind text, message text, detail jsonb)),\nins as (\n  insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\n  select $1, $3, 'guard', e.agent, e.message, jsonb_build_object('kind', e.kind) || coalesce(e.detail, '{}'::jsonb) from ev e\n  returning id\n)\nselect count(*)::int as guard_events from ins;",
+        "options": {
+          "queryReplacement": "={{ (v => [v.order_id, JSON.stringify([...((v.product_validation || {}).guard_events || []), ...((v.shipping_validation || {}).guard_events || [])]), $execution.id])($('ApplyBusinessRules').first().json) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
       "onError": "continueErrorOutput",
-      "alwaysOutputData": true
+      "notes": "Every time the deterministic layer overruled an agent (hallucinated code, unconfirmed Ship-To, agent error) one 'guard' row is written. Always one output row."
     },
     {
       "id": "4b74bc66-2477-509f-a7b2-9731e260a8d5",
@@ -662,7 +750,7 @@
       "typeVersion": 2.3,
       "position": [
         0,
-        2512
+        2736
       ],
       "parameters": {
         "conditions": {
@@ -695,7 +783,7 @@
       "typeVersion": 1.9,
       "position": [
         208,
-        2512
+        2736
       ],
       "parameters": {
         "promptType": "define",
@@ -715,7 +803,7 @@
       "typeVersion": 1.3,
       "position": [
         208,
-        2784
+        3008
       ],
       "parameters": {
         "model": {
@@ -745,7 +833,7 @@
       "typeVersion": 2.7,
       "position": [
         448,
-        2512
+        2736
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -773,7 +861,7 @@
       "typeVersion": 2.7,
       "position": [
         656,
-        2512
+        2736
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -794,13 +882,40 @@
       "onError": "continueErrorOutput"
     },
     {
+      "id": "fb52529f-c61f-54a5-86f1-ff94ac3d222f",
+      "name": "LogDraftStep",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        864,
+        2736
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\nvalues ($1, $2, $3, $4, $5, $6::jsonb)\nreturning id;",
+        "options": {
+          "queryReplacement": "={{ [$json.order_id, $execution.id, 'draft', 'OrderDesk', 'Draft Order #' + $json.draft_order_id + ' created; waiting for the order desk', JSON.stringify({ draft_order_id: $json.draft_order_id, reasons: $('ApplyBusinessRules').first().json.reasons })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
       "id": "f8960be8-e7a0-5e46-88e5-a030090b15af",
       "name": "NotifyOrderDesk",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        864,
-        2512
+        1072,
+        2736
       ],
       "parameters": {
         "fromEmail": "pg-order-bot@al-poc.lab",
@@ -828,8 +943,8 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        1072,
-        2512
+        1280,
+        2736
       ],
       "parameters": {
         "resume": "webhook",
@@ -845,8 +960,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        1280,
-        2512
+        1488,
+        2736
       ],
       "parameters": {
         "conditions": {
@@ -878,8 +993,8 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.7,
       "position": [
-        1280,
-        2784
+        1488,
+        3008
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -906,7 +1021,7 @@
       "typeVersion": 2,
       "position": [
         0,
-        3200
+        3408
       ],
       "parameters": {
         "jsCode": "// The sales-order call for the ESB. Same shape whether the order came straight through or via the order desk.\nconst v = $('ApplyBusinessRules').first().json;\nconst o = v.order;\nconst approvedBy = v.decision === 'auto' ? 'auto' : 'order-desk';\nreturn [{ json: {\n  order_id: v.order_id,\n  payload: {\n    order_id: v.order_id, idempotency_key: v.order_id, source: 'n8n-pg-order-intake',\n    sold_to: o.sold_to_code, ship_to: o.ship_to_code,\n    requested_delivery_date: o.requested_delivery_date || v.cutoff.earliest_dispatch_date || '',\n    lines: o.lines.map(l => ({ item: l.line_no, material: l.product_code, quantity: l.quantity, unit: l.unit })),\n    customer_reference: $('AssembleDocument').first().json.subject,\n    approved_by: approvedBy, confidence: v.confidence,\n  },\n}}];"
@@ -919,7 +1034,7 @@
       "typeVersion": 4.2,
       "position": [
         208,
-        3200
+        3408
       ],
       "parameters": {
         "method": "POST",
@@ -941,7 +1056,7 @@
       "typeVersion": 2.7,
       "position": [
         416,
-        3200
+        3408
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -968,7 +1083,7 @@
       "typeVersion": 2.7,
       "position": [
         624,
-        3200
+        3408
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -986,8 +1101,7 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "onError": "continueErrorOutput",
-      "alwaysOutputData": true
+      "onError": "continueErrorOutput"
     },
     {
       "id": "a30d8a0d-6180-563a-977c-b1c4972909e7",
@@ -996,10 +1110,10 @@
       "typeVersion": 2,
       "position": [
         416,
-        3472
+        3680
       ],
       "parameters": {
-        "jsCode": "// Exponential backoff for the ESB call. attempt n waits base * 2^(n-1) seconds; after the cap the order is escalated.\nconst MAX = 5, BASE = 4;\nconst attempt = $runIndex + 1;                      // how many times this node has run in this execution\nconst err = $input.first().json.error || {};\nconst status = Number(err.httpCode || err.status || (String(err.message || '').match(/\\b(5\\d\\d)\\b/) || [])[1] || 0);\nconst delay_seconds = BASE * Math.pow(2, attempt - 1);\nreturn [{ json: {\n  order_id: $('BuildSalesOrderPayload').first().json.order_id,\n  attempt, max_attempts: MAX, retry: attempt <= MAX, delay_seconds,\n  http_status: status, error_message: String(err.message || err.description || err || '').slice(0, 300),\n}}];"
+        "jsCode": "// Exponential backoff for the ESB call. attempt n waits base * 2^(n-1) seconds; after the cap the order is escalated.\nconst V = (k, d) => { try { const v = $vars[k]; return v === undefined || v === null || v === '' ? d : Number(v); } catch (e) { return d; } };\nconst MAX = V('AL_PG_ESB_MAX_ATTEMPTS', 5), BASE = V('AL_PG_ESB_BACKOFF_BASE_S', 4);\nconst attempt = $runIndex + 1;                      // how many times this node has run in this execution\nconst err = $input.first().json.error || {};\nconst status = Number(err.httpCode || err.status || (String(err.message || '').match(/\\b(5\\d\\d)\\b/) || [])[1] || 0);\nconst delay_seconds = BASE * Math.pow(2, attempt - 1);\nreturn [{ json: {\n  order_id: $('BuildSalesOrderPayload').first().json.order_id,\n  attempt, max_attempts: MAX, retry: attempt <= MAX, delay_seconds,\n  http_status: status, error_message: String(err.message || err.description || err || '').slice(0, 300),\n}}];"
       }
     },
     {
@@ -1009,7 +1123,7 @@
       "typeVersion": 2.7,
       "position": [
         624,
-        3472
+        3680
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -1027,8 +1141,7 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "onError": "continueErrorOutput",
-      "alwaysOutputData": true
+      "onError": "continueErrorOutput"
     },
     {
       "id": "35fc6ad2-7f31-57c1-8620-d00cf3f6b10d",
@@ -1037,7 +1150,7 @@
       "typeVersion": 2.3,
       "position": [
         832,
-        3472
+        3680
       ],
       "parameters": {
         "conditions": {
@@ -1071,7 +1184,7 @@
       "typeVersion": 1.1,
       "position": [
         1040,
-        3472
+        3680
       ],
       "parameters": {
         "resume": "timeInterval",
@@ -1087,7 +1200,7 @@
       "typeVersion": 2.7,
       "position": [
         1040,
-        3744
+        3952
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -1114,7 +1227,7 @@
       "typeVersion": 2.7,
       "position": [
         1248,
-        3744
+        3952
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -1141,7 +1254,7 @@
       "typeVersion": 2.1,
       "position": [
         0,
-        3952
+        4416
       ],
       "parameters": {
         "fromEmail": "pg-order-bot@al-poc.lab",
@@ -1162,6 +1275,150 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "content": "## 1. Notify, then pull\n\nA Pub/Sub push lands here and is acknowledged at once; it carries only a pointer. The email and its attachments are pulled from the mailbox afterwards (Gmail API in production) and the order record is opened. Pub/Sub delivers at least once: a notification for an order that already exists is logged and dropped. The order id is set as execution custom data, so Executions can be filtered by order.",
+        "width": 1280,
+        "height": 672,
+        "color": 4
+      },
+      "id": "zone-01",
+      "name": "zone-01",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Read the attachment\n\nThe first attachment is routed by type: PDF text, XLSX or CSV rows (flattened to text), or none. Everything is joined with the email body into one document. DOCX and scans go to Document AI on the customer instance.",
+        "width": 1072,
+        "height": 768,
+        "color": 4
+      },
+      "id": "zone-02",
+      "name": "zone-02",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Zero-shot extraction\n\nThe Information Extractor reads the document against a fixed schema: intent, customer, Ship-To as written, product lines, empty cylinder returns, reasoning and confidence. No templates, no training. Prompt and completion tokens of every model call are written to step_log. Non-orders stop after the log.",
+        "width": 1104,
+        "height": 736,
+        "color": 5
+      },
+      "id": "zone-03",
+      "name": "zone-03",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        1344
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 4. Specialist agents\n\nTwo sub-workflow agents validate against Salesforce (lab: Postgres). The Product Agent resolves every line to exactly one catalogue code; the Shipping Agent resolves Sold-To, Ship-To and the plant cut-off. Each agent's tool calls are logged as reflection steps.",
+        "width": 448,
+        "height": 736,
+        "color": 5
+      },
+      "id": "zone-04",
+      "name": "zone-04",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1056,
+        1344
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 5. Deterministic gate\n\nCode, not a model, decides. Critical rules (intent, account, every product code, Ship-To, quantities) must all pass. Review rules: Elephant Order, empty cylinder returns, confidence threshold. Thresholds come from n8n Variables (AL_PG_*), editable in Settings without a redeploy. Every time the deterministic layer overruled an agent, a guard event is logged.",
+        "width": 864,
+        "height": 416,
+        "color": 3
+      },
+      "id": "zone-05",
+      "name": "zone-05",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        2128
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 6. Order desk (HITL)\n\nAuto goes straight to posting. Anything else becomes a pre-filled Draft Order with an AI-written note (fixed reason wording from the gate) and the order desk gets Approve / Reject links. The execution sleeps on the Wait node until they click.",
+        "width": 1728,
+        "height": 624,
+        "color": 6
+      },
+      "id": "zone-06",
+      "name": "zone-06",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        2592
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 7. Post to SAP through the ESB\n\nOne sales-order call to the TIBCO endpoint (lab: mock). On a 5xx the loop waits 4, 8, 16, 32, 64 s between attempts, five retries over about two minutes, each one logged. After the fifth failure the validated order is escalated to the order desk and marked failed.",
+        "width": 1488,
+        "height": 896,
+        "color": 3
+      },
+      "id": "zone-07",
+      "name": "zone-07",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        3264
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 8. Failures\n\nEvery fallible node routes its error output here. Ops gets the error, the order id and the execution id. Nothing is posted on a failure.",
+        "width": 304,
+        "height": 416,
+        "color": 7
+      },
+      "id": "zone-08",
+      "name": "zone-08",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        4208
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## PG Order Intake, PoC\n\nAir Liquide RFP PoC, order-to-cash intake. Email in, SAP sales order or Salesforce Draft Order out, under five minutes.\n\nLab stand-ins: Postgres al_poc plays Gmail (mailbox), Salesforce (accounts, partner_roles, product_catalog, draft_orders), the OCB cut-off API (cut_offs) and SAP (sales_orders). The mock TIBCO workflow is the ESB. LM Studio plays Gemini. Mailpit is the order desk inbox. Dashboard: /webhook/al-pg-order-metrics. Settings > Variables: AL_PG_AUTO_CONFIDENCE_MIN, AL_PG_ELEPHANT_QTY, AL_PG_ESB_MAX_ATTEMPTS, AL_PG_ESB_BACKOFF_BASE_S.\n\nTest: python3 scripts/send-fixture.py data/fixtures/<fixture>.json [--chaos N]",
+        "width": 720,
+        "height": 368,
+        "color": 6
+      },
+      "id": "zone-panel-1",
+      "name": "zone-panel-1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -576
+      ]
     }
   ],
   "connections": {
@@ -1209,7 +1466,7 @@
       "main": [
         [
           {
-            "node": "PrepareDocument",
+            "node": "IsNewNotification",
             "type": "main",
             "index": 0
           }
@@ -1217,6 +1474,24 @@
         [
           {
             "node": "NotifyOpsFailure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IsNewNotification": {
+      "main": [
+        [
+          {
+            "node": "PrepareDocument",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LogDuplicateNotification",
             "type": "main",
             "index": 0
           }
@@ -1494,6 +1769,24 @@
       "main": [
         [
           {
+            "node": "LogGuardEvents",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LogGuardEvents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LogGuardEvents": {
+      "main": [
+        [
+          {
             "node": "IsAutoDecision",
             "type": "main",
             "index": 0
@@ -1570,7 +1863,7 @@
       "main": [
         [
           {
-            "node": "NotifyOrderDesk",
+            "node": "LogDraftStep",
             "type": "main",
             "index": 0
           }
@@ -1578,6 +1871,24 @@
         [
           {
             "node": "NotifyOpsFailure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LogDraftStep": {
+      "main": [
+        [
+          {
+            "node": "NotifyOrderDesk",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "NotifyOrderDesk",
             "type": "main",
             "index": 0
           }
@@ -1766,6 +2077,7 @@
       ]
     }
   },
+  "active": true,
   "settings": {
     "executionOrder": "v1",
     "saveManualExecutions": true,

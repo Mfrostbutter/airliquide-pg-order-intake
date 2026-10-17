@@ -224,7 +224,7 @@
       "typeVersion": 2.7,
       "position": [
         208,
-        640
+        928
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -253,7 +253,7 @@
       "typeVersion": 2.7,
       "position": [
         0,
-        640
+        928
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -271,8 +271,7 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "onError": "continueErrorOutput",
-      "alwaysOutputData": true
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ae4a00e4-2cfa-5353-b8d4-496cc894d1d2",
@@ -281,10 +280,10 @@
       "typeVersion": 2,
       "position": [
         416,
-        640
+        928
       ],
       "parameters": {
-        "jsCode": "// Deterministic post-check: the Ship-To must be a partner of the Sold-To; cut-off evaluated in the plant's time zone.\nconst agent = $('ResolveShipToWithAgent').first().json;\nconst out = agent.output || {};\nconst row = ($('VerifyShipTo').first().json || {});\nconst verified = !!row.ship_to_code;\nconst tz = out.tz || row.tz || 'Europe/Paris';\nconst cutoff = String(out.cutoff_local_time || row.cutoff_local_time || '').slice(0, 5);\nlet past_cutoff = false, earliest_dispatch_date = null, now_local = null;\ntry {\n  const now = DateTime.now().setZone(tz);\n  now_local = now.toFormat('yyyy-LL-dd HH:mm');\n  if (cutoff) {\n    const [h, m] = cutoff.split(':').map(Number);\n    const c = now.set({ hour: h, minute: m, second: 0, millisecond: 0 });\n    past_cutoff = now > c;\n    let d = now.plus({ days: past_cutoff ? 2 : 1 });\n    while (d.weekday > 5) d = d.plus({ days: 1 });\n    earliest_dispatch_date = d.toFormat('yyyy-LL-dd');\n  }\n} catch (e) { /* leave cut-off fields empty */ }\nconst steps = (agent.intermediateSteps || []).map(s => ({\n  tool: s.action?.tool, input: s.action?.toolInput, observation: String(s.observation ?? '').slice(0, 300),\n}));\nreturn [{ json: {\n  order_id: $('StartShippingAgent').first().json.order_id,\n  agent: 'ShippingAgent',\n  sold_to_code: row.sold_to_code || out.sold_to_code || '', sold_to_name: out.sold_to_name || '',\n  ship_to_code: verified ? row.ship_to_code : '', ship_to_name: verified ? row.name : (out.ship_to_name || ''),\n  ship_to_city: verified ? row.city : '',\n  match: out.match || 'not_found', status: verified && ['exact', 'resolved'].includes(out.match) ? 'verified' : (out.match || 'not_found'),\n  candidates: out.candidates || [],\n  sales_org: out.sales_org || row.sales_org || '', plant: out.plant || row.plant || '',\n  cutoff_local_time: cutoff, tz, now_local, past_cutoff, earliest_dispatch_date,\n  explanation: out.explanation || '',\n  tool_calls: steps.length, trace: steps,\n}}];"
+        "jsCode": "// Deterministic post-check: the Ship-To must be a partner of the Sold-To; cut-off evaluated in the plant's time zone.\nconst agent = $('ResolveShipToWithAgent').first().json;\nconst out = agent.output || {};\nconst row = ($('VerifyShipTo').first().json || {});\nconst verified = !!row.ship_to_code;\nconst tz = out.tz || row.tz || 'Europe/Paris';\nconst cutoff = String(out.cutoff_local_time || row.cutoff_local_time || '').slice(0, 5);\nlet past_cutoff = false, earliest_dispatch_date = null, now_local = null;\ntry {\n  const now = DateTime.now().setZone(tz);\n  now_local = now.toFormat('yyyy-LL-dd HH:mm');\n  if (cutoff) {\n    const [h, m] = cutoff.split(':').map(Number);\n    const c = now.set({ hour: h, minute: m, second: 0, millisecond: 0 });\n    past_cutoff = now > c;\n    let d = now.plus({ days: past_cutoff ? 2 : 1 });\n    while (d.weekday > 5) d = d.plus({ days: 1 });\n    earliest_dispatch_date = d.toFormat('yyyy-LL-dd');\n  }\n} catch (e) { /* leave cut-off fields empty */ }\nconst steps = (agent.intermediateSteps || []).map(s => ({\n  tool: s.action?.tool, input: s.action?.toolInput, observation: String(s.observation ?? '').slice(0, 300),\n}));\ntry { $execution.customData.set('order_id', String($('StartShippingAgent').first().json.order_id)); } catch (e) {}\n// Guard events: the model named a Ship-To the partner-role table does not confirm.\nconst guard_events = [];\nif (out.ship_to_code && !verified) guard_events.push({ agent: 'ShippingAgent', kind: 'unverified_ship_to', message: `Agent returned Ship-To ${out.ship_to_code} which is not a partner of ${out.sold_to_code || 'the account'}`, detail: { sold_to_code: out.sold_to_code || '', ship_to_code: out.ship_to_code, match: out.match } });\nreturn [{ json: {\n  order_id: $('StartShippingAgent').first().json.order_id,\n  agent: 'ShippingAgent', guard_events,\n  sold_to_code: row.sold_to_code || out.sold_to_code || '', sold_to_name: out.sold_to_name || '',\n  ship_to_code: verified ? row.ship_to_code : '', ship_to_name: verified ? row.name : (out.ship_to_name || ''),\n  ship_to_city: verified ? row.city : '',\n  match: out.match || 'not_found', status: verified && ['exact', 'resolved'].includes(out.match) ? 'verified' : (out.match || 'not_found'),\n  candidates: out.candidates || [],\n  sales_org: out.sales_org || row.sales_org || '', plant: out.plant || row.plant || '',\n  cutoff_local_time: cutoff, tz, now_local, past_cutoff, earliest_dispatch_date,\n  explanation: out.explanation || '',\n  tool_calls: steps.length, trace: steps,\n}}];"
       }
     },
     {
@@ -297,8 +296,40 @@
         480
       ],
       "parameters": {
-        "jsCode": "const err = $input.first().json;\nreturn [{ json: {\n  order_id: $('StartShippingAgent').first().json.order_id, agent: 'ShippingAgent', sold_to_code: '', ship_to_code: '',\n  match: 'not_found', status: 'agent_error', candidates: [], past_cutoff: false, earliest_dispatch_date: null,\n  explanation: 'Shipping Agent failed: ' + String(err.error?.message || err.error || 'unknown error'), tool_calls: 0, trace: [], agent_error: true,\n}}];"
+        "jsCode": "const err = $input.first().json;\ntry { $execution.customData.set('order_id', String($('StartShippingAgent').first().json.order_id)); } catch (e) {}\nreturn [{ json: {\n  order_id: $('StartShippingAgent').first().json.order_id, agent: 'ShippingAgent', sold_to_code: '', ship_to_code: '',\n  match: 'not_found', status: 'agent_error', candidates: [], guard_events: [{ agent: 'ShippingAgent', kind: 'agent_error', message: 'Shipping Agent failed', detail: { error: String(err.error?.message || err.error || '') } }], past_cutoff: false, earliest_dispatch_date: null,\n  explanation: 'Shipping Agent failed: ' + String(err.error?.message || err.error || 'unknown error'), tool_calls: 0, trace: [], agent_error: true,\n}}];"
       }
+    },
+    {
+      "parameters": {
+        "content": "## 1. Shipping Agent\n\nCalled with the sender email, the customer name and the delivery address as written. Tools: find the Sold-To by email, list its Ship-To partner roles, read the plant cut-off (OCB). Structured output only; codes must come from a tool result.",
+        "width": 1280,
+        "height": 832,
+        "color": 5
+      },
+      "id": "zone-01",
+      "name": "zone-01",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Deterministic verify and log\n\nThe chosen Ship-To must be a partner of the chosen Sold-To, re-read from the table. The cut-off is evaluated in the plant's time zone and the earliest dispatch date computed. Tool calls go to step_log.",
+        "width": 656,
+        "height": 400,
+        "color": 3
+      },
+      "id": "zone-02",
+      "name": "zone-02",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        736
+      ]
     }
   ],
   "connections": {
@@ -426,7 +457,7 @@
         ],
         [
           {
-            "node": "FinalizeShippingValidation",
+            "node": "ReportShippingAgentFailure",
             "type": "main",
             "index": 0
           }
@@ -434,6 +465,7 @@
       ]
     }
   },
+  "active": true,
   "settings": {
     "executionOrder": "v1",
     "saveManualExecutions": true,

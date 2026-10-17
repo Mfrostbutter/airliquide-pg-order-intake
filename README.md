@@ -7,8 +7,9 @@ sales order through the TIBCO ESB or parks a pre-filled Draft Order for the orde
 desk. Everything here runs on the local lab with synthetic data and stand-ins; the
 real connectors are swapped in once Air Liquide grants access.
 
-Built 2026-10-16 on n8n 2.35.5. All five workflows are published on the lab and the
-five fixtures pass end to end.
+Built 2026-10-16 on n8n 2.35.5, extended 2026-10-17. All six workflows are published on
+the lab and the five fixtures pass end to end, plus the duplicate-notification and
+threshold-override checks.
 
 ## Architecture
 
@@ -46,6 +47,14 @@ Design rules that shape every workflow:
   The email and its attachment are fetched afterwards.
 - **One attachment per email** in PoC scope. DOCX and scanned PDFs are routed to
   Document AI on the customer instance, not here.
+- **Idempotent on the order.** Pub/Sub delivers at least once; a notification for an
+  order that already exists is logged and dropped. `order_id` is the correlation id on
+  every table row and on the execution's custom data.
+- **Thresholds are n8n Variables.** `AL_PG_AUTO_CONFIDENCE_MIN`, `AL_PG_ELEPHANT_QTY`,
+  `AL_PG_ESB_MAX_ATTEMPTS`, `AL_PG_ESB_BACKOFF_BASE_S` in Settings > Variables; the code
+  falls back to 0.7, 80, 5, 4. Changing one takes effect on the next order, no redeploy.
+- **Guard events.** Every time the deterministic layer overrules an agent (code not in
+  the catalogue, Ship-To not a partner, agent error) a `guard` row is logged and counted.
 
 ## Workflows
 
@@ -53,18 +62,18 @@ Ids on the lab are in `deploy/workflows.dev.json`. Tags: `al-poc`, `pg-order-int
 
 ### 1. Intake PG order (Pub/Sub to SAP or Draft Order)
 
-42 nodes in eight zones. The whole order-to-cash path for one email.
+46 nodes in eight zones. The whole order-to-cash path for one email.
 
 ![Intake](docs/screenshots/intake-fit.png)
 
 | Zone | Nodes | What happens |
 |---|---|---|
-| Notify, then pull | Webhook `POST /webhook/al-pg-order-notify`, Code, Postgres x2 | Ack the notification, decode the pointer, pull the mailbox row, open the `order_intake` record |
+| Notify, then pull | Webhook `POST /webhook/al-pg-order-notify`, Code, Postgres x2, If, Postgres | Ack the notification, decode the pointer, pull the mailbox row, open the `order_intake` record; a redelivered notification is logged as `duplicate_notification` and dropped |
 | Read the attachment | Code, Switch, Extract from File x3, Code x2 | Route the first attachment by type (pdf / xlsx / csv / none), flatten rows to text, join with the body into one document |
 | Zero-shot extraction | Information Extractor + model, Postgres x2, If, Postgres | Fixed schema: intent, customer, Ship-To as written, product lines, empty returns, reasoning, confidence. Non-orders stop here as `not_an_order` |
 | Specialist agents | Execute Sub-workflow x2 | Product Agent, then Shipping Agent, each returning verified codes |
-| Deterministic gate | Code, Postgres x2 | C1-C6 critical (intent, account, every code, Ship-To, quantities, email match); R7 Elephant Order over 80 units; R8 empty cylinder returns; R9 confidence under 0.7; I10 cut-off informational |
-| Order desk (HITL) | If, Basic LLM Chain, Postgres x2, Send Email, Wait, If, Postgres | Draft Order row with an AI-written note (fixed wording from the gate reasons), Approve / Reject links built from `$execution.resumeUrl`, execution sleeps on the Wait |
+| Deterministic gate | Code, Postgres x3 | C1-C6 critical (intent, account, every code, Ship-To, quantities, agents answered); R7 Elephant Order over `AL_PG_ELEPHANT_QTY`; R8 empty cylinder returns; R9 confidence under `AL_PG_AUTO_CONFIDENCE_MIN`; I10 cut-off informational; guard events from both agents written to `step_log` |
+| Order desk (HITL) | If, Basic LLM Chain, Postgres x3, Send Email, Wait, If, Postgres | Draft Order row with an AI-written note (fixed wording from the gate reasons), Approve / Reject links built from `$execution.resumeUrl`, execution sleeps on the Wait |
 | Post to SAP through the ESB | Code, HTTP Request, Postgres x2, Code, Postgres, If, Wait, Postgres x2 | One sales-order call; on 5xx the loop waits 4, 8, 16, 32, 64 s (`$runIndex` counts attempts), each attempt logged; after the fifth failure the order is escalated to the desk and marked failed |
 | Failures | Send Email | Every fallible node's error output lands here; ops gets the error, order id and execution id |
 
@@ -103,12 +112,26 @@ it records the order and answers 201 with a SAP number, idempotent on `order_id`
 
 ### 5. Metrics dashboard (order intake)
 
-`GET /webhook/al-pg-order-metrics` serves an HTML page over `order_intake` and
-`step_log`: orders received, automation rate, auto posted, sent to the desk, failures,
-average end-to-end seconds, average confidence, last 25 orders. Refreshes every 15 s.
-On the customer instance the same queries feed Looker or Power BI.
+`GET /webhook/al-pg-order-metrics` serves an HTML page over `order_intake`,
+`step_log` and `draft_orders`: orders received, automation rate, auto posted, sent to
+the desk, failures, average end-to-end seconds (automated path), average confidence,
+open desk queue and average desk wait (human path, timed separately), guard events,
+LLM tokens per order and in total, last 25 orders. Refreshes every 15 s. On the
+customer instance the same queries feed Looker or Power BI.
 
 ![Metrics dashboard](docs/screenshots/metrics-dashboard-fit.png)
+
+### 6. LLM telemetry harvester (tokens per call)
+
+Every minute: list the last 30 executions (metadata only), pick the finished ones of
+the intake and the two agents that have no `llm_call` rows yet, fetch those one at a
+time with run data (at most 10), and insert one `step_log` row per model call with
+prompt tokens, completion tokens and duration. Idempotent per execution, node and
+run. Model sub-node usage is not reachable from workflow expressions, which is why
+this runs as a separate workflow. Production carries the same `llm.tokens.*`
+attributes out of n8n over OpenTelemetry; this is the PoC and chargeback path.
+
+![LLM telemetry harvester](docs/screenshots/llm-telemetry-fit.png)
 
 ## Lab stand-ins
 
@@ -121,6 +144,7 @@ On the customer instance the same queries feed Looker or Power BI.
 | Gemini / Vertex AI | LM Studio `qwen/qwen3-coder-30b` on the host, OpenAI-compatible |
 | Order desk mailbox | Mailpit SMTP |
 | Dashboards (Looker) | Metrics dashboard workflow |
+| OpenTelemetry LLM spans | LLM telemetry harvester over the n8n API |
 
 Schema and seed: `data/schema.sql`, `data/seed.sql`. Three accounts, four Ship-Tos,
 nine products with multilingual aliases, two plant cut-offs (France 23:59 Paris,
@@ -138,7 +162,7 @@ infisical run --projectId <id> --env dev --silent -- python3 scripts/lab-setup-d
 python3 scripts/make-fixture-files.py
 
 # deploy, sub-workflows first (n8n refuses to publish a caller whose targets are unpublished)
-for f in al-mock-tibco-esb al-product-agent al-shipping-agent al-pg-order-intake al-metrics-dashboard; do
+for f in al-mock-tibco-esb al-product-agent al-shipping-agent al-pg-order-intake al-metrics-dashboard al-llm-telemetry; do
   infisical run --projectId <id> --env dev --silent -- ./scripts/with-lab.sh ./scripts/deploy.sh workflows/dev/$f.json dev --activate
 done
 
@@ -146,7 +170,14 @@ done
 python3 scripts/send-fixture.py data/fixtures/f1-durand-clean-order.json
 python3 scripts/watch-order.py <order_id>
 python3 scripts/send-fixture.py data/fixtures/f5-durand-esb-retry.json --chaos 2
+
+# redeliver a notification (must be dropped), and a throughput rehearsal
+python3 scripts/send-fixture.py data/fixtures/f3-stmartin-pdf-elephant-unknown.json --no-purge
+python3 scripts/load-test.py data/fixtures/f1-durand-clean-order.json --count 20 --concurrency 5
 ```
+
+The harvester needs a Header Auth credential `Lab n8n API` (`X-N8N-API-KEY`) on the
+instance and the four `AL_PG_*` variables; `deploy/creds.dev.json` maps the name.
 
 Dashboard: `http://localhost:5678/webhook/al-pg-order-metrics`. Order-desk mail:
 Mailpit UI.
@@ -155,7 +186,7 @@ The workflow JSON is generated. Edit `workflows/src/build_pg_order_intake.py`, r
 run the canvas layout tool with the matching `workflows/src/zones_*.json`, then deploy.
 Never hand-edit the JSON.
 
-## Results (2026-10-16)
+## Results (2026-10-16, re-run 2026-10-17 after the changes)
 
 | Fixture | Path | Outcome | Time |
 |---|---|---|---|
@@ -163,7 +194,13 @@ Never hand-edit the JSON.
 | f2 German body, XLSX, past Berlin cut-off | auto | SAP order, cut-off noted | 17 s |
 | f3 PDF, qty 100, unknown product, 40 empties | draft | Draft Order with three reasons; Approve link posted | 25 s to desk |
 | f4 price inquiry | stop | `not_an_order` | |
-| f5 ESB 503 twice (`--chaos 2`) | auto | 503, 4 s, 503, 8 s, posted on attempt 3 | |
+| f5 ESB 503 twice (`--chaos 2`) | auto | 503, 4 s, 503, 8 s, posted on attempt 3 | 25 s |
+| f3 notification redelivered (`--no-purge`) | drop | `duplicate_notification` logged, order untouched | |
+| f1 with `AL_PG_ELEPHANT_QTY` set to 5 in Settings > Variables | draft | R7 fails on 6 cylinders; restored to 80, f1 auto again | 20 s |
+| f3 and f1 drafts approved from the desk email | post | SAP orders created; desk wait 9.2 and 1.0 min on the dashboard | |
+
+Per-call tokens on f5 (lab model): extractor 1 call 1,261 tokens, Product Agent 3 calls
+4,455, Shipping Agent 4 calls 6,454; about 12,000 to 14,000 per order.
 
 RFP success criteria covered on the lab: under 5 minutes per order, deterministic
 match on intent / Ship-To / email / codes / quantities, confidence gate at 0.7,
@@ -179,7 +216,12 @@ metrics.
   (lands under `data/fixtures/al/`, gitignored).
 - DOCX and multi-attachment emails.
 - Gemini via Vertex AI in place of LM Studio; re-check the lexical guard against it.
+- Production volume of 10,000 orders a day (Air Liquide, 2026-10-17): topology and
+  settings in `docs/DEPLOYMENT-ARCHITECTURE.md`; the move from stand-ins to Gmail,
+  Salesforce, OCB and TIBCO node by node in `docs/INTEGRATION-RUNBOOK.md`.
 
 See `CLAUDE.md` for contacts, instance map and conventions, `docs/RFP-BRIEF.md` for
 the requirement digest and the answer-grid commitments, `docs/RUNBOOK.md` for
-operations, `docs/HANDOFF.md` for the phase handoff.
+operations, `docs/HANDOFF.md` for the phase handoff, `docs/INTEGRATION-RUNBOOK.md` for
+the swap to Air Liquide's systems, `docs/DEPLOYMENT-ARCHITECTURE.md` for 10,000 orders
+a day. `NOTICE.md` separates engagement deliverables from pre-existing tooling.

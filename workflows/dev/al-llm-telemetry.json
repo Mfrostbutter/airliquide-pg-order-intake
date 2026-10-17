@@ -1,0 +1,284 @@
+{
+  "name": "AL PoC: LLM telemetry harvester (tokens per call)",
+  "nodes": [
+    {
+      "id": "a74ff4be-0bdf-5a1e-8bb4-049cef1a33de",
+      "name": "EveryMinute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "notes": "PoC path for per-call LLM telemetry. Production: OpenTelemetry export from n8n carries the same llm.tokens.* attributes to the APM."
+    },
+    {
+      "id": "b982056e-cc6b-58eb-8365-64be42f9cb9a",
+      "name": "ListRecentExecutions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        208,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:5678/api/v1/executions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "30"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "LabN8nApi0000001",
+          "name": "Lab n8n API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "notes": "Metadata only, no execution data. Never pull data in bulk: 100 full executions in one call OOM-killed the lab instance."
+    },
+    {
+      "id": "26b1cb77-70c8-56f5-8177-31897a81e6ba",
+      "name": "AlreadyHarvested",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        416,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select distinct execution_id from al_poc.step_log where step = 'llm_call' and execution_id = any(string_to_array($1, ','));",
+        "options": {
+          "queryReplacement": "={{ [($json.data || []).map(e => String(e.id)).join(',')] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "af4fad0a-d2da-5b81-a81e-747aab616b18",
+      "name": "PickExecutions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Recent executions (no data) -> the finished ones of our workflows that have no llm_call rows yet. At most 10 per run.\nconst OUR_WORKFLOWS = [\"ufx7qhXP8jGqVrus\", \"yxP9Kgx9uVyEFiRZ\", \"n5UiTb8wRn3qwZ84\"];\nconst listed = ($('ListRecentExecutions').first().json.data || []);\nconst done = new Set($input.all().map(i => String((i.json || {}).execution_id || '')).filter(Boolean));\nconst picked = listed\n  .filter(e => OUR_WORKFLOWS.includes(e.workflowId) && ['success', 'error'].includes(e.status) && !done.has(String(e.id)))\n  .slice(0, 10)\n  .map(e => ({ json: { id: String(e.id), workflowId: e.workflowId, status: e.status } }));\nreturn picked;"
+      }
+    },
+    {
+      "id": "3ddbb5a2-ad65-55be-8e11-fc945619f237",
+      "name": "FetchExecution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        832,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=http://localhost:5678/api/v1/executions/{{ $json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "includeData",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "LabN8nApi0000001",
+          "name": "Lab n8n API"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "One execution at a time, with data. At most 10 per minute."
+    },
+    {
+      "id": "0a93ec17-8c82-5b8b-a1cc-6a679308492c",
+      "name": "ExtractLlmCalls",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// One execution with data -> one row per model call: tokens in/out, duration, which agent, which order.\nconst MODEL_NODES = {\"ExtractorModel\": \"Extractor\", \"ExplanationModel\": \"OrderDesk\", \"ProductAgentModel\": \"ProductAgent\", \"ProductParserFixerModel\": \"ProductAgent\", \"ShippingAgentModel\": \"ShippingAgent\", \"ShippingParserFixerModel\": \"ShippingAgent\"};\nconst out = [];\nfor (const item of $input.all()) {\n  const ex = item.json || {};\n  const order_id = (ex.customData || {}).order_id || null;\n  const rows = [];\n  if (order_id) {\n    const runData = ((ex.data || {}).resultData || {}).runData || {};\n    for (const [nodeName, runs] of Object.entries(runData)) {\n      const agent = MODEL_NODES[nodeName];\n      if (!agent) continue;\n      (runs || []).forEach((run, run_index) => {\n        const first = (((run.data || {}).ai_languageModel || [])[0] || [])[0] || {};\n        const u = (first.json || {}).tokenUsage || {};\n        rows.push({ order_id, execution_id: String(ex.id), workflow_id: ex.workflowId, node: nodeName, run_index, agent,\n          tokens_in: Number(u.promptTokens || 0), tokens_out: Number(u.completionTokens || 0), duration_ms: Number(run.executionTime || 0),\n          at: run.startTime ? new Date(run.startTime).toISOString() : null });\n      });\n    }\n  }\n  // A marker row keeps an execution without calls (or without an order id) from being fetched again.\n  if (!rows.length) rows.push({ order_id, execution_id: String(ex.id), workflow_id: ex.workflowId, node: '(none)', run_index: 0, agent: 'none',\n                                tokens_in: 0, tokens_out: 0, duration_ms: 0, at: null });\n  out.push({ json: { execution_id: String(ex.id), rows, count: rows.length } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "d5b2f1d9-965d-5d8d-8d4b-2a5bd044cbef",
+      "name": "InsertLlmCalls",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1248,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with r as (select * from jsonb_to_recordset($1::jsonb) as x(order_id text, execution_id text, workflow_id text, node text, run_index int, agent text,\n            tokens_in int, tokens_out int, duration_ms int, at timestamptz)),\nins as (\n  insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail, tokens_in, tokens_out, duration_ms, at)\n  select case when o.order_id is null or coalesce(r.at, now()) >= o.started_at - interval '2 minutes' then r.order_id end,\n         r.execution_id, 'llm_call', r.agent, r.node || ' run ' || r.run_index || ': ' || (r.tokens_in + r.tokens_out) || ' tokens',\n         jsonb_build_object('node', r.node, 'run_index', r.run_index, 'workflow_id', r.workflow_id), r.tokens_in, r.tokens_out, r.duration_ms, coalesce(r.at, now())\n  from r left join al_poc.order_intake o on o.order_id = r.order_id\n  on conflict (execution_id, (detail->>'node'), (detail->>'run_index')) where step = 'llm_call' do nothing\n  returning id\n)\nselect $2 as execution_id, (select count(*) from r)::int as seen, (select count(*) from ins)::int as inserted;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.rows), $json.execution_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "mMndKTE8fwlVCQ5K",
+          "name": "Lab Postgres al_poc"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Calls from an earlier run of the same order id (a re-sent lab fixture) are kept for the execution marker but detached from the order."
+    },
+    {
+      "parameters": {
+        "content": "## LLM telemetry harvester\n\nEvery minute: list the last 30 executions (metadata only), keep the finished ones of the intake and the two agents that have no llm_call rows yet, fetch those one at a time with run data (at most 10), and insert one step_log row per model call (tokens in/out, duration), idempotent per execution, node and run. The dashboard sums them per order. Never pull execution data in bulk: 100 full executions in one call OOM-killed the lab. Production: the same llm.tokens.* attributes leave n8n over OpenTelemetry; this workflow is the PoC and chargeback path.",
+        "width": 1488,
+        "height": 400,
+        "color": 6
+      },
+      "id": "zone-01",
+      "name": "zone-01",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -192
+      ]
+    }
+  ],
+  "connections": {
+    "EveryMinute": {
+      "main": [
+        [
+          {
+            "node": "ListRecentExecutions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ListRecentExecutions": {
+      "main": [
+        [
+          {
+            "node": "AlreadyHarvested",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AlreadyHarvested": {
+      "main": [
+        [
+          {
+            "node": "PickExecutions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PickExecutions": {
+      "main": [
+        [
+          {
+            "node": "FetchExecution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FetchExecution": {
+      "main": [
+        [
+          {
+            "node": "ExtractLlmCalls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ExtractLlmCalls": {
+      "main": [
+        [
+          {
+            "node": "InsertLlmCalls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [
+    "al-poc",
+    "pg-order-intake",
+    "monitoring"
+  ]
+}

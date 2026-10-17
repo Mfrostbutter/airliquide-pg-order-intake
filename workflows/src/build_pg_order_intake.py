@@ -41,6 +41,18 @@ ELEPHANT_QTY = 80
 ESB_MAX_ATTEMPTS = 5
 ESB_BACKOFF_BASE_S = 4   # 4, 8, 16, 32, 64 s = 124 s before escalation
 
+# n8n Variables (Settings > Variables) override the defaults above without a redeploy.
+VARS = {"AL_PG_AUTO_CONFIDENCE_MIN": AUTO_CONFIDENCE_MIN, "AL_PG_ELEPHANT_QTY": ELEPHANT_QTY,
+        "AL_PG_ESB_MAX_ATTEMPTS": ESB_MAX_ATTEMPTS, "AL_PG_ESB_BACKOFF_BASE_S": ESB_BACKOFF_BASE_S}
+READ_VAR = "const V = (k, d) => { try { const v = $vars[k]; return v === undefined || v === null || v === '' ? d : Number(v); } catch (e) { return d; } };"
+SET_CORRELATION = "try { $execution.customData.set('order_id', String(__ID__)); } catch (e) {}"
+
+CRED_N8NAPI = {"httpHeaderAuth": {"id": "LabN8nApi0000001", "name": "Lab n8n API"}}   # id mapped by name at deploy time
+N8N_API_BASE = "http://localhost:5678/api/v1"
+WF_TELEMETRY = "AL PoC: LLM telemetry harvester (tokens per call)"
+MODEL_NODES = {"ExtractorModel": "Extractor", "ExplanationModel": "OrderDesk", "ProductAgentModel": "ProductAgent",
+               "ProductParserFixerModel": "ProductAgent", "ShippingAgentModel": "ShippingAgent", "ShippingParserFixerModel": "ShippingAgent"}
+
 
 def nid(name):
     return str(uuid.uuid5(NS, name))
@@ -54,11 +66,11 @@ def node(name, ntype, ver, pos, params, **extra):
 
 
 def pg(name, pos, query, replacement, **extra):
+    base = dict(credentials=CRED_PG, retryOnFail=True, maxTries=3, waitBetweenTries=3000, onError="continueErrorOutput")
+    base.update(extra)
     return node(name, "n8n-nodes-base.postgres", 2.7, pos,
                 {"operation": "executeQuery", "query": query,
-                 "options": {"queryReplacement": replacement}},
-                credentials=CRED_PG, retryOnFail=True, maxTries=3, waitBetweenTries=3000,
-                onError="continueErrorOutput", **extra)
+                 "options": {"queryReplacement": replacement}}, **base)
 
 
 def pg_tool(name, pos, description, query, replacement):
@@ -94,12 +106,12 @@ def code(name, pos, js, **extra):
 
 
 def step_log(name, pos, step, agent, message, detail, order_expr="$json.order_id"):
-    """Agent-reflection log row. message and detail are JS expressions evaluated inside the n8n expression."""
+    """Agent-reflection log row. message and detail are JS expressions evaluated inside the n8n expression.
+    No alwaysOutputData: with continueErrorOutput it would emit on both outputs on a failure and double the flow."""
     return pg(name, pos,
               "insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\n"
               "values ($1, $2, $3, $4, $5, $6::jsonb)\nreturning id;",
-              f"={{{{ [{order_expr}, $execution.id, '{step}', '{agent}', {message}, {detail}] }}}}",
-              alwaysOutputData=True)
+              f"={{{{ [{order_expr}, $execution.id, '{step}', '{agent}', {message}, {detail}] }}}}")
 
 
 def sub_input_schema(fields):
@@ -108,7 +120,7 @@ def sub_input_schema(fields):
 
 
 def workflow(name, nodes, connections, tags):
-    return {"name": name, "nodes": nodes, "connections": connections,
+    return {"name": name, "nodes": nodes, "connections": connections, "active": True,
             "settings": {"executionOrder": "v1", "saveManualExecutions": True,
                          "saveDataSuccessExecution": "all", "saveDataErrorExecution": "all"},
             "tags": tags}
@@ -223,6 +235,9 @@ const out = agent.output || {};
 const verified = new Map(($('VerifyProductMatches').all() || [])
   .map(i => i.json).filter(r => r && r.product_code).map(r => [r.product_code, r]));
 const inputLines = $('StartProductAgent').first().json.lines || [];
+__READ_VAR__
+const ELEPHANT_QTY = V('AL_PG_ELEPHANT_QTY', __ELEPHANT__);
+__SET_CORRELATION__
 // Lexical check: the catalogue row's name or one alias must be mostly present in the customer's words,
 // or the customer must have written the code itself. Same gas in a different product does not pass.
 const norm = s => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -264,17 +279,23 @@ const lines = (out.lines || []).map((l, i) => {
 const steps = (agent.intermediateSteps || []).map(s => ({
   tool: s.action?.tool, input: s.action?.toolInput, observation: String(s.observation ?? '').slice(0, 300),
 }));
+// Guard events: the deterministic layer overruled the model. Logged as step 'guard' by the intake, counted on the dashboard.
+const guard_events = [];
+for (const l of lines) {
+  if (l.status === 'unverified_code') guard_events.push({ agent: 'ProductAgent', kind: 'unverified_code', message: `Agent returned code not in the catalogue for line ${l.line_no}`, detail: { line_no: l.line_no, input_text: l.input_text, code: (out.lines || [])[l.line_no - 1]?.product_code || '' } });
+  else if (l.status === 'ambiguous' && l.lexical && !l.lexical.ok && l.lexical.score < 1 && ['exact', 'resolved'].includes(l.match)) guard_events.push({ agent: 'ProductAgent', kind: 'lexical_mismatch', message: `Agent match overruled for line ${l.line_no}: customer words do not describe the chosen product`, detail: { line_no: l.line_no, input_text: l.input_text, lexical: l.lexical } });
+}
 return [{ json: {
   order_id: $('StartProductAgent').first().json.order_id,
   agent: 'ProductAgent',
-  lines,
+  lines, guard_events,
   all_verified: lines.length > 0 && lines.every(l => l.status === 'verified'),
   elephant_lines: lines.filter(l => l.elephant).map(l => `${l.product_code || l.input_text}: ${l.quantity}`),
   summary: out.summary || '',
   tool_calls: steps.length,
   trace: steps,
 }}];
-""".replace("ELEPHANT_QTY", str(ELEPHANT_QTY))
+""".replace("__READ_VAR__", READ_VAR).replace("__ELEPHANT__", str(ELEPHANT_QTY)).replace("__SET_CORRELATION__", SET_CORRELATION.replace("__ID__", "$('StartProductAgent').first().json.order_id"))
 
 
 def build_product_agent():
@@ -326,9 +347,10 @@ def build_product_agent():
         code("ReportProductAgentFailure", (208, R1 + 480), r"""
 // The agent itself failed (model down, max iterations). Return a shape the caller can route to review.
 const err = $input.first().json;
+try { $execution.customData.set('order_id', String($('StartProductAgent').first().json.order_id)); } catch (e) {}
 return [{ json: {
   order_id: $('StartProductAgent').first().json.order_id, agent: 'ProductAgent', lines: [], all_verified: false,
-  elephant_lines: [], summary: 'Product Agent failed: ' + String(err.error?.message || err.error || 'unknown error'),
+  elephant_lines: [], guard_events: [{ agent: 'ProductAgent', kind: 'agent_error', message: 'Product Agent failed', detail: { error: String(err.error?.message || err.error || '') } }], summary: 'Product Agent failed: ' + String(err.error?.message || err.error || 'unknown error'),
   tool_calls: 0, trace: [], agent_error: true,
 }}];
 """),
@@ -345,7 +367,7 @@ return [{ json: {
     w("LogProductAgentStep", "VerifyProductMatches", 0)
     w("LogProductAgentStep", "VerifyProductMatches", 1)
     w("VerifyProductMatches", "FinalizeProductValidation", 0)
-    w("VerifyProductMatches", "FinalizeProductValidation", 1)
+    w("VerifyProductMatches", "ReportProductAgentFailure", 1)
     return workflow(WF_PRODUCT, nodes, w.c, ["al-poc", "pg-order-intake", "agent"])
 
 
@@ -404,9 +426,13 @@ try {
 const steps = (agent.intermediateSteps || []).map(s => ({
   tool: s.action?.tool, input: s.action?.toolInput, observation: String(s.observation ?? '').slice(0, 300),
 }));
+try { $execution.customData.set('order_id', String($('StartShippingAgent').first().json.order_id)); } catch (e) {}
+// Guard events: the model named a Ship-To the partner-role table does not confirm.
+const guard_events = [];
+if (out.ship_to_code && !verified) guard_events.push({ agent: 'ShippingAgent', kind: 'unverified_ship_to', message: `Agent returned Ship-To ${out.ship_to_code} which is not a partner of ${out.sold_to_code || 'the account'}`, detail: { sold_to_code: out.sold_to_code || '', ship_to_code: out.ship_to_code, match: out.match } });
 return [{ json: {
   order_id: $('StartShippingAgent').first().json.order_id,
-  agent: 'ShippingAgent',
+  agent: 'ShippingAgent', guard_events,
   sold_to_code: row.sold_to_code || out.sold_to_code || '', sold_to_name: out.sold_to_name || '',
   ship_to_code: verified ? row.ship_to_code : '', ship_to_name: verified ? row.name : (out.ship_to_name || ''),
   ship_to_city: verified ? row.city : '',
@@ -478,9 +504,10 @@ def build_shipping_agent():
         code("FinalizeShippingValidation", (416, R2), SHIPPING_FINALIZE),
         code("ReportShippingAgentFailure", (208, R1 + 480), r"""
 const err = $input.first().json;
+try { $execution.customData.set('order_id', String($('StartShippingAgent').first().json.order_id)); } catch (e) {}
 return [{ json: {
   order_id: $('StartShippingAgent').first().json.order_id, agent: 'ShippingAgent', sold_to_code: '', ship_to_code: '',
-  match: 'not_found', status: 'agent_error', candidates: [], past_cutoff: false, earliest_dispatch_date: null,
+  match: 'not_found', status: 'agent_error', candidates: [], guard_events: [{ agent: 'ShippingAgent', kind: 'agent_error', message: 'Shipping Agent failed', detail: { error: String(err.error?.message || err.error || '') } }], past_cutoff: false, earliest_dispatch_date: null,
   explanation: 'Shipping Agent failed: ' + String(err.error?.message || err.error || 'unknown error'), tool_calls: 0, trace: [], agent_error: true,
 }}];
 """),
@@ -498,7 +525,7 @@ return [{ json: {
     w("LogShippingAgentStep", "VerifyShipTo", 0)
     w("LogShippingAgentStep", "VerifyShipTo", 1)
     w("VerifyShipTo", "FinalizeShippingValidation", 0)
-    w("VerifyShipTo", "FinalizeShippingValidation", 1)
+    w("VerifyShipTo", "ReportShippingAgentFailure", 1)
     return workflow(WF_SHIPPING, nodes, w.c, ["al-poc", "pg-order-intake", "agent"])
 
 
@@ -565,6 +592,7 @@ if (!email_id && body.message?.data) {
   try { email_id = JSON.parse(Buffer.from(body.message.data, 'base64').toString('utf8')).email_id; } catch (e) { email_id = null; }
 }
 if (!email_id) throw new Error('notification carries no email_id');
+try { $execution.customData.set('order_id', 'ORD-' + email_id); $execution.customData.set('email_id', String(email_id)); } catch (e) {}
 return [{ json: { email_id, message_id, order_id: 'ORD-' + email_id, notified_at: new Date().toISOString() } }];
 """
 
@@ -617,8 +645,9 @@ return [{ json: { ...env, document_text, attachment_text_chars: attText.length, 
 
 APPLY_BUSINESS_RULES = r"""
 // Deterministic gate. Critical rules must all be 1.0; review rules decide auto vs Draft Order.
-const AUTO_CONFIDENCE_MIN = __CONF__;
-const ELEPHANT_QTY = __ELEPHANT__;
+__READ_VAR__
+const AUTO_CONFIDENCE_MIN = V('AL_PG_AUTO_CONFIDENCE_MIN', __CONF__);
+const ELEPHANT_QTY = V('AL_PG_ELEPHANT_QTY', __ELEPHANT__);
 const env = $('AssembleDocument').first().json;
 const ex = $('ExtractOrderWithAi').first().json.output || {};
 const prod = $('RunProductAgent').first().json || {};
@@ -676,7 +705,7 @@ return [{ json: {
   },
   product_validation: prod, shipping_validation: ship,
 }}];
-""".replace("__CONF__", str(AUTO_CONFIDENCE_MIN)).replace("__ELEPHANT__", str(ELEPHANT_QTY))
+""".replace("__READ_VAR__", READ_VAR).replace("__CONF__", str(AUTO_CONFIDENCE_MIN)).replace("__ELEPHANT__", str(ELEPHANT_QTY))
 
 BUILD_SALES_ORDER_PAYLOAD = r"""
 // The sales-order call for the ESB. Same shape whether the order came straight through or via the order desk.
@@ -698,7 +727,8 @@ return [{ json: {
 
 COMPUTE_BACKOFF = r"""
 // Exponential backoff for the ESB call. attempt n waits base * 2^(n-1) seconds; after the cap the order is escalated.
-const MAX = __MAX__, BASE = __BASE__;
+__READ_VAR__
+const MAX = V('AL_PG_ESB_MAX_ATTEMPTS', __MAX__), BASE = V('AL_PG_ESB_BACKOFF_BASE_S', __BASE__);
 const attempt = $runIndex + 1;                      // how many times this node has run in this execution
 const err = $input.first().json.error || {};
 const status = Number(err.httpCode || err.status || (String(err.message || '').match(/\b(5\d\d)\b/) || [])[1] || 0);
@@ -708,7 +738,7 @@ return [{ json: {
   attempt, max_attempts: MAX, retry: attempt <= MAX, delay_seconds,
   http_status: status, error_message: String(err.message || err.description || err || '').slice(0, 300),
 }}];
-""".replace("__MAX__", str(ESB_MAX_ATTEMPTS)).replace("__BASE__", str(ESB_BACKOFF_BASE_S))
+""".replace("__READ_VAR__", READ_VAR).replace("__MAX__", str(ESB_MAX_ATTEMPTS)).replace("__BASE__", str(ESB_BACKOFF_BASE_S))
 
 DRAFT_EXPLANATION_PROMPT = (
     "=You write the note that accompanies a Draft Order in Salesforce so the order desk can resolve it fast.\n"
@@ -767,10 +797,17 @@ def build_main():
            "={{ [$json.email_id] }}",
            notes="Gmail stand-in. Customer instance: Gmail API users.messages.get plus attachments.get with the service account."),
         pg("OpenOrderRecord", (624, RA),
-           "insert into al_poc.order_intake (order_id, email_id, execution_id, status)\nvalues ($1, $2, $3, 'received')\n"
-           "on conflict (order_id) do update set execution_id = excluded.execution_id, status = 'received', started_at = now(),\n"
-           "  finished_at = null, decision = null, sap_order_number = null, draft_order_id = null\nreturning order_id, email_id;",
-           "={{ ['ORD-' + $json.email_id, $json.email_id, $execution.id] }}"),
+           "with ins as (\n  insert into al_poc.order_intake (order_id, email_id, execution_id, status)\n  values ($1, $2, $3, 'received')\n"
+           "  on conflict (order_id) do nothing\n  returning order_id, email_id, status\n)\n"
+           "select order_id, email_id, true as is_new, status from ins\nunion all\n"
+           "select o.order_id, o.email_id, false as is_new, o.status from al_poc.order_intake o\n"
+           "where o.order_id = $1 and not exists (select 1 from ins);",
+           "={{ ['ORD-' + $json.email_id, $json.email_id, $execution.id] }}",
+           notes="Idempotent on order_id: Pub/Sub delivers at least once, so a redelivered notification must not reprocess an order."),
+        if_node("IsNewNotification", (832, RA), "={{ $json.is_new }}", "boolean", "true", single=True),
+        step_log("LogDuplicateNotification", (1040, RA + 272), "duplicate_notification", "Intake",
+                 "'Duplicate notification ignored; order is ' + $json.status",
+                 "JSON.stringify({ status: $json.status, message_id: $('DecodeNotification').first().json.message_id })"),
         code("PrepareDocument", (0, RB), PREPARE_DOCUMENT),
         node("RouteByAttachmentType", "n8n-nodes-base.switch", 3.4, (208, RB),
              {"mode": "rules", "rules": {"values": [switch_rule("pdf", "pdf"), switch_rule("xlsx", "xlsx"), switch_rule("csv", "csv")]},
@@ -837,6 +874,13 @@ def build_main():
         step_log("LogDecisionStep", (416, RD), "decision", "Gate",
                  "'Decision ' + $json.decision + ' (critical_match=' + $('ApplyBusinessRules').first().json.critical_match + ')'",
                  "JSON.stringify({ rules: $('ApplyBusinessRules').first().json.rules, reasons: $('ApplyBusinessRules').first().json.reasons })"),
+        pg("LogGuardEvents", (624, RD),
+           "with ev as (select * from jsonb_to_recordset($2::jsonb) as e(agent text, kind text, message text, detail jsonb)),\n"
+           "ins as (\n  insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail)\n"
+           "  select $1, $3, 'guard', e.agent, e.message, jsonb_build_object('kind', e.kind) || coalesce(e.detail, '{}'::jsonb) from ev e\n  returning id\n)\n"
+           "select count(*)::int as guard_events from ins;",
+           "={{ (v => [v.order_id, JSON.stringify([...((v.product_validation || {}).guard_events || []), ...((v.shipping_validation || {}).guard_events || [])]), $execution.id])($('ApplyBusinessRules').first().json) }}",
+           notes="Every time the deterministic layer overruled an agent (hallucinated code, unconfirmed Ship-To, agent error) one 'guard' row is written. Always one output row."),
         if_node("IsAutoDecision", (0, RE), "={{ $('ApplyBusinessRules').first().json.decision }}", "string", "equals", "auto"),
         node("WriteDraftExplanation", "@n8n/n8n-nodes-langchain.chainLlm", 1.9, (208, RE),
              {"promptType": "define", "text": DRAFT_EXPLANATION_PROMPT.replace("$json", "$('ApplyBusinessRules').first().json"), "batching": {}},
@@ -851,17 +895,20 @@ def build_main():
         pg("LinkDraftToOrder", (656, RE),
            "update al_poc.order_intake set draft_order_id = $2, status = 'pending_review' where order_id = $1 returning order_id, draft_order_id;",
            "={{ [$json.order_id, $json.id] }}"),
-        node("NotifyOrderDesk", "n8n-nodes-base.emailSend", 2.1, (864, RE),
+        step_log("LogDraftStep", (864, RE), "draft", "OrderDesk",
+                 "'Draft Order #' + $json.draft_order_id + ' created; waiting for the order desk'",
+                 "JSON.stringify({ draft_order_id: $json.draft_order_id, reasons: $('ApplyBusinessRules').first().json.reasons })"),
+        node("NotifyOrderDesk", "n8n-nodes-base.emailSend", 2.1, (1072, RE),
              {"fromEmail": MAIL_FROM, "toEmail": MAIL_ORDER_DESK,
               "subject": "=[Draft Order] {{ $('ApplyBusinessRules').first().json.order.sold_to_name || $('AssembleDocument').first().json.from }}: {{ $('ApplyBusinessRules').first().json.reasons[0] }}",
               "emailFormat": "html", "html": ORDER_DESK_EMAIL_HTML, "options": {"appendAttribution": False}},
              credentials=CRED_SMTP, retryOnFail=True, maxTries=3, waitBetweenTries=3000),
-        node("WaitForOrderDesk", "n8n-nodes-base.wait", 1.1, (1072, RE),
+        node("WaitForOrderDesk", "n8n-nodes-base.wait", 1.1, (1280, RE),
              {"resume": "webhook", "httpMethod": "GET", "options": {}},
              webhookId=nid("wait-order-desk"),
              notes="The execution sleeps here for hours or days at no worker cost. Production: resumed by the Salesforce Draft Order status change."),
-        if_node("OrderDeskApproved", (1280, RE), "={{ $json.query.decision }}", "string", "equals", "approve"),
-        pg("MarkRejected", (1280, RE + 272),
+        if_node("OrderDeskApproved", (1488, RE), "={{ $json.query.decision }}", "string", "equals", "approve"),
+        pg("MarkRejected", (1488, RE + 272),
            "with d as (update al_poc.draft_orders set status = 'rejected', resolved_at = now() where order_id = $1)\n"
            "update al_poc.order_intake set status = 'rejected', finished_at = now() where order_id = $1 returning order_id, status;",
            "={{ [$('ApplyBusinessRules').first().json.order_id] }}"),
@@ -915,8 +962,10 @@ def build_main():
     w("DecodeNotification", "PullEmailFromMailbox")
     w("PullEmailFromMailbox", "OpenOrderRecord", 0)
     w("PullEmailFromMailbox", "NotifyOpsFailure", 1)
-    w("OpenOrderRecord", "PrepareDocument", 0)
+    w("OpenOrderRecord", "IsNewNotification", 0)
     w("OpenOrderRecord", "NotifyOpsFailure", 1)
+    w("IsNewNotification", "PrepareDocument", 0)
+    w("IsNewNotification", "LogDuplicateNotification", 1)
     w("PrepareDocument", "RouteByAttachmentType")
     w("RouteByAttachmentType", "ExtractPdfText", 0)
     w("RouteByAttachmentType", "ExtractXlsxRows", 1)
@@ -946,16 +995,20 @@ def build_main():
     w("ApplyBusinessRules", "SaveValidation")
     w("SaveValidation", "LogDecisionStep", 0)
     w("SaveValidation", "NotifyOpsFailure", 1)
-    w("LogDecisionStep", "IsAutoDecision", 0)
-    w("LogDecisionStep", "IsAutoDecision", 1)
+    w("LogDecisionStep", "LogGuardEvents", 0)
+    w("LogDecisionStep", "LogGuardEvents", 1)
+    w("LogGuardEvents", "IsAutoDecision", 0)
+    w("LogGuardEvents", "IsAutoDecision", 1)
     w("IsAutoDecision", "BuildSalesOrderPayload", 0)
     w("IsAutoDecision", "WriteDraftExplanation", 1)
     w("ExplanationModel", "WriteDraftExplanation", 0, "ai_languageModel")
     w("WriteDraftExplanation", "CreateDraftOrder")
     w("CreateDraftOrder", "LinkDraftToOrder", 0)
     w("CreateDraftOrder", "NotifyOpsFailure", 1)
-    w("LinkDraftToOrder", "NotifyOrderDesk", 0)
+    w("LinkDraftToOrder", "LogDraftStep", 0)
     w("LinkDraftToOrder", "NotifyOpsFailure", 1)
+    w("LogDraftStep", "NotifyOrderDesk", 0)
+    w("LogDraftStep", "NotifyOrderDesk", 1)
     w("NotifyOrderDesk", "WaitForOrderDesk")
     w("WaitForOrderDesk", "OrderDeskApproved")
     w("OrderDeskApproved", "BuildSalesOrderPayload", 0)
@@ -978,13 +1031,113 @@ def build_main():
     return workflow(WF_MAIN, nodes, w.c, ["al-poc", "pg-order-intake"])
 
 
+# =============================================================================== LLM telemetry harvester
+PICK_EXECUTIONS = r"""
+// Recent executions (no data) -> the finished ones of our workflows that have no llm_call rows yet. At most 10 per run.
+const OUR_WORKFLOWS = __OUR_WORKFLOWS__;
+const listed = ($('ListRecentExecutions').first().json.data || []);
+const done = new Set($input.all().map(i => String((i.json || {}).execution_id || '')).filter(Boolean));
+const picked = listed
+  .filter(e => OUR_WORKFLOWS.includes(e.workflowId) && ['success', 'error'].includes(e.status) && !done.has(String(e.id)))
+  .slice(0, 10)
+  .map(e => ({ json: { id: String(e.id), workflowId: e.workflowId, status: e.status } }));
+return picked;
+"""
+
+EXTRACT_LLM_CALLS = r"""
+// One execution with data -> one row per model call: tokens in/out, duration, which agent, which order.
+const MODEL_NODES = __MODEL_NODES__;
+const out = [];
+for (const item of $input.all()) {
+  const ex = item.json || {};
+  const order_id = (ex.customData || {}).order_id || null;
+  const rows = [];
+  if (order_id) {
+    const runData = ((ex.data || {}).resultData || {}).runData || {};
+    for (const [nodeName, runs] of Object.entries(runData)) {
+      const agent = MODEL_NODES[nodeName];
+      if (!agent) continue;
+      (runs || []).forEach((run, run_index) => {
+        const first = (((run.data || {}).ai_languageModel || [])[0] || [])[0] || {};
+        const u = (first.json || {}).tokenUsage || {};
+        rows.push({ order_id, execution_id: String(ex.id), workflow_id: ex.workflowId, node: nodeName, run_index, agent,
+          tokens_in: Number(u.promptTokens || 0), tokens_out: Number(u.completionTokens || 0), duration_ms: Number(run.executionTime || 0),
+          at: run.startTime ? new Date(run.startTime).toISOString() : null });
+      });
+    }
+  }
+  // A marker row keeps an execution without calls (or without an order id) from being fetched again.
+  if (!rows.length) rows.push({ order_id, execution_id: String(ex.id), workflow_id: ex.workflowId, node: '(none)', run_index: 0, agent: 'none',
+                                tokens_in: 0, tokens_out: 0, duration_ms: 0, at: null });
+  out.push({ json: { execution_id: String(ex.id), rows, count: rows.length } });
+}
+return out;
+"""
+
+
+def our_workflow_ids():
+    """Lab ids of the workflows whose model calls are harvested, from deploy/workflows.dev.json (empty before the first deploy)."""
+    try:
+        ids = json.loads((DEV.parent.parent / "deploy" / "workflows.dev.json").read_text())
+        return [ids[n] for n in (WF_MAIN, WF_PRODUCT, WF_SHIPPING) if n in ids]
+    except Exception:
+        return []
+
+
+def build_telemetry_harvester():
+    R = 0
+    nodes = [
+        node("EveryMinute", "n8n-nodes-base.scheduleTrigger", 1.2, (0, R),
+             {"rule": {"interval": [{"field": "minutes", "minutesInterval": 1}]}},
+             notes="PoC path for per-call LLM telemetry. Production: OpenTelemetry export from n8n carries the same llm.tokens.* attributes to the APM."),
+        node("ListRecentExecutions", "n8n-nodes-base.httpRequest", 4.2, (208, R),
+             {"method": "GET", "url": f"{N8N_API_BASE}/executions", "authentication": "genericCredentialType",
+              "genericAuthType": "httpHeaderAuth", "sendQuery": True,
+              "queryParameters": {"parameters": [{"name": "limit", "value": "30"}]},
+              "options": {"timeout": 20000}},
+             credentials=CRED_N8NAPI, retryOnFail=True, maxTries=2, waitBetweenTries=5000,
+             notes="Metadata only, no execution data. Never pull data in bulk: 100 full executions in one call OOM-killed the lab instance."),
+        pg("AlreadyHarvested", (416, R),
+           "select distinct execution_id from al_poc.step_log where step = 'llm_call' and execution_id = any(string_to_array($1, ','));",
+           "={{ [($json.data || []).map(e => String(e.id)).join(',')] }}", alwaysOutputData=True, onError="continueRegularOutput"),
+        code("PickExecutions", (624, R), PICK_EXECUTIONS.replace("__OUR_WORKFLOWS__", json.dumps(our_workflow_ids()))),
+        node("FetchExecution", "n8n-nodes-base.httpRequest", 4.2, (832, R),
+             {"method": "GET", "url": f"={N8N_API_BASE}/executions/{{{{ $json.id }}}}", "authentication": "genericCredentialType",
+              "genericAuthType": "httpHeaderAuth", "sendQuery": True,
+              "queryParameters": {"parameters": [{"name": "includeData", "value": "true"}]},
+              "options": {"timeout": 20000, "batching": {"batch": {"batchSize": 1, "batchInterval": 250}}}},
+             credentials=CRED_N8NAPI, onError="continueRegularOutput",
+             notes="One execution at a time, with data. At most 10 per minute."),
+        code("ExtractLlmCalls", (1040, R), EXTRACT_LLM_CALLS.replace("__MODEL_NODES__", json.dumps(MODEL_NODES))),
+        pg("InsertLlmCalls", (1248, R),
+           "with r as (select * from jsonb_to_recordset($1::jsonb) as x(order_id text, execution_id text, workflow_id text, node text, run_index int, agent text,\n"
+           "            tokens_in int, tokens_out int, duration_ms int, at timestamptz)),\n"
+           "ins as (\n  insert into al_poc.step_log (order_id, execution_id, step, agent, message, detail, tokens_in, tokens_out, duration_ms, at)\n"
+           "  select case when o.order_id is null or coalesce(r.at, now()) >= o.started_at - interval '2 minutes' then r.order_id end,\n"
+           "         r.execution_id, 'llm_call', r.agent, r.node || ' run ' || r.run_index || ': ' || (r.tokens_in + r.tokens_out) || ' tokens',\n"
+           "         jsonb_build_object('node', r.node, 'run_index', r.run_index, 'workflow_id', r.workflow_id), r.tokens_in, r.tokens_out, r.duration_ms, coalesce(r.at, now())\n"
+           "  from r left join al_poc.order_intake o on o.order_id = r.order_id\n  on conflict (execution_id, (detail->>'node'), (detail->>'run_index')) where step = 'llm_call' do nothing\n  returning id\n)\n"
+           "select $2 as execution_id, (select count(*) from r)::int as seen, (select count(*) from ins)::int as inserted;",
+           "={{ [JSON.stringify($json.rows), $json.execution_id] }}", onError="continueRegularOutput",
+           notes="Calls from an earlier run of the same order id (a re-sent lab fixture) are kept for the execution marker but detached from the order."),
+    ]
+    w = Wiring()
+    w("EveryMinute", "ListRecentExecutions")
+    w("ListRecentExecutions", "AlreadyHarvested")
+    w("AlreadyHarvested", "PickExecutions")
+    w("PickExecutions", "FetchExecution")
+    w("FetchExecution", "ExtractLlmCalls")
+    w("ExtractLlmCalls", "InsertLlmCalls")
+    return workflow(WF_TELEMETRY, nodes, w.c, ["al-poc", "pg-order-intake", "monitoring"])
+
+
 # =============================================================================== metrics dashboard
 RENDER_DASHBOARD = r"""
 const m = $('ReadMetrics').first().json || {};
 const rows = $input.all().map(i => i.json);
 const esc = s => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 const tile = (label, value, unit = '') => `<div class="tile"><div class="v">${esc(value ?? '-')}<span class="u">${unit}</span></div><div class="l">${label}</div></div>`;
-const tr = rows.map(r => `<tr><td>${esc(r.order_id)}</td><td>${esc(r.intent)}</td><td class="${esc(r.decision)}">${esc(r.decision || '-')}</td><td>${esc(r.status)}</td><td>${esc(r.confidence)}</td><td>${esc(r.seconds ?? '-')}</td><td>${esc(r.sap_order_number || '')}</td><td>${esc(r.steps)}</td><td>${esc(String(r.started_at).slice(0, 19).replace('T', ' '))}</td></tr>`).join('');
+const tr = rows.map(r => `<tr><td>${esc(r.order_id)}</td><td>${esc(r.intent)}</td><td class="${esc(r.decision)}">${esc(r.decision || '-')}</td><td>${esc(r.status)}</td><td>${esc(r.confidence)}</td><td>${esc(r.seconds ?? '-')}</td><td>${esc(r.desk_minutes ?? '-')}</td><td>${esc(r.sap_order_number || '')}</td><td>${esc(r.steps)}</td><td>${esc(r.guards)}</td><td>${esc(r.tokens ?? '-')}</td><td>${esc(String(r.started_at).slice(0, 19).replace('T', ' '))}</td></tr>`).join('');
 const html = `<!doctype html><html><head><meta charset="utf-8"><title>PG Order Intake, PoC metrics</title>
 <meta http-equiv="refresh" content="15">
 <style>body{font-family:Arial,sans-serif;margin:24px;color:#1d1d1f;background:#fafafa}h1{font-size:20px}.tiles{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0 24px}
@@ -993,8 +1146,9 @@ table{border-collapse:collapse;background:#fff;font-size:13px}th,td{border:1px s
 td.auto{color:#1a7f37;font-weight:bold}td.draft{color:#b45309;font-weight:bold}td.skip{color:#777}.note{color:#666;font-size:12px}</style></head><body>
 <h1>PG Order Intake, PoC metrics</h1>
 <div class="tiles">${tile('orders received', m.orders_total)}${tile('automation rate', m.automation_rate_pct, '%')}${tile('auto posted', m.auto_posted)}${tile('sent to order desk', m.sent_to_review)}${tile('failed', m.failed)}${tile('avg end-to-end (auto)', m.avg_auto_seconds, 's')}${tile('avg AI confidence', m.avg_confidence)}</div>
-<table><tr><th>Order</th><th>Intent</th><th>Decision</th><th>Status</th><th>Confidence</th><th>Seconds</th><th>SAP order</th><th>Logged steps</th><th>Started</th></tr>${tr || '<tr><td colspan=9>no orders yet</td></tr>'}</table>
-<p class="note">Refreshes every 15 s from al_poc.order_intake and step_log. Targets from the RFP: under 5 minutes per order, over 80% automation on simple orders, critical fields at 1.0, reasoning confidence at or above 0.7.</p>
+<div class="tiles">${tile('order desk: open', m.desk_open)}${tile('order desk: avg wait', m.avg_desk_wait_minutes, 'min')}${tile('guard events', m.guard_events)}${tile('avg LLM tokens / order', m.avg_tokens_per_order)}${tile('LLM tokens total', m.tokens_total)}</div>
+<table><tr><th>Order</th><th>Intent</th><th>Decision</th><th>Status</th><th>Confidence</th><th>Seconds</th><th>Desk min</th><th>SAP order</th><th>Steps</th><th>Guards</th><th>Tokens</th><th>Started</th></tr>${tr || '<tr><td colspan=12>no orders yet</td></tr>'}</table>
+<p class="note">Refreshes every 15 s from al_poc.order_intake, step_log and draft_orders. Targets from the RFP: under 5 minutes per order, over 80% automation on simple orders, critical fields at 1.0, reasoning confidence at or above 0.7. Automated and human steps are timed separately: Seconds is the automated path, Desk min is the order desk wait. Guard events count the times the deterministic layer overruled an agent. Thresholds live in Settings > Variables (AL_PG_*).</p>
 </body></html>`;
 return [{ json: { html } }];
 """
@@ -1006,12 +1160,15 @@ def build_metrics():
         node("ReceiveDashboardRequest", "n8n-nodes-base.webhook", 2.1, (0, R),
              {"httpMethod": "GET", "path": "al-pg-order-metrics", "responseMode": "responseNode", "options": {}},
              webhookId=nid("webhook-al-pg-order-metrics")),
-        pg("ReadMetrics", (208, R), "select * from al_poc.metrics;", "", alwaysOutputData=True),
+        pg("ReadMetrics", (208, R), "select * from al_poc.metrics;", "", alwaysOutputData=True, onError="continueRegularOutput"),
         pg("ReadRecentOrders", (416, R),
            "select o.order_id, o.intent, o.decision, o.status, o.confidence, o.sap_order_number, o.started_at,\n"
            "  extract(epoch from (o.finished_at - o.started_at))::int as seconds,\n"
-           "  (select count(*) from al_poc.step_log s where s.order_id = o.order_id) as steps\n"
-           "from al_poc.order_intake o order by o.started_at desc limit 25;", "", alwaysOutputData=True),
+           "  (select count(*) from al_poc.step_log s where s.order_id = o.order_id) as steps,\n"
+           "  (select count(*) from al_poc.step_log s where s.order_id = o.order_id and s.step = 'guard') as guards,\n"
+           "  (select sum(coalesce(s.tokens_in, 0) + coalesce(s.tokens_out, 0)) from al_poc.step_log s where s.order_id = o.order_id) as tokens,\n"
+           "  (select round(extract(epoch from (coalesce(d.resolved_at, now()) - d.created_at)) / 60, 1) from al_poc.draft_orders d where d.order_id = o.order_id order by d.id desc limit 1) as desk_minutes\n"
+           "from al_poc.order_intake o order by o.started_at desc limit 25;", "", alwaysOutputData=True, onError="continueRegularOutput"),
         code("RenderDashboard", (624, R), RENDER_DASHBOARD),
         node("RespondHtml", "n8n-nodes-base.respondToWebhook", 1.5, (832, R),
              {"respondWith": "text", "responseBody": "={{ $json.html }}",
@@ -1020,9 +1177,7 @@ def build_metrics():
     w = Wiring()
     w("ReceiveDashboardRequest", "ReadMetrics")
     w("ReadMetrics", "ReadRecentOrders", 0)
-    w("ReadMetrics", "ReadRecentOrders", 1)
     w("ReadRecentOrders", "RenderDashboard", 0)
-    w("ReadRecentOrders", "RenderDashboard", 1)
     w("RenderDashboard", "RespondHtml")
     return workflow(WF_METRICS, nodes, w.c, ["al-poc", "pg-order-intake", "monitoring"])
 
@@ -1033,3 +1188,4 @@ if __name__ == "__main__":
     write(build_shipping_agent(), "al-shipping-agent.json")
     write(build_main(), "al-pg-order-intake.json")
     write(build_metrics(), "al-metrics-dashboard.json")
+    write(build_telemetry_harvester(), "al-llm-telemetry.json")

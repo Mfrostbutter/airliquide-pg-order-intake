@@ -109,6 +109,14 @@ n8n answered 75 requirements. The ones the build is measured against:
 - Gaps stated openly: no native BPMN import (rows 17, 18, 66), no native OCR (rows 1,
   9), RPA through the HTTP node (row 32), no dedicated China services (row 64).
 
+## Volume
+
+Air Liquide told Frosty on 2026-10-17 that production will process potentially 10,000
+purchase orders a day. The Q&A (row 8) gave "approximately 10,000 orders" as the
+baseline with no period, and the proposal sized 2.5 M executions a year on "10,000
+addressable orders". The daily figure is the design point now; see
+`DEPLOYMENT-ARCHITECTURE.md`. Newest source wins.
+
 ## Q&A facts added 2026-10-17
 
 - Air Liquide already has agents built for this use case; reusable, not mandatory

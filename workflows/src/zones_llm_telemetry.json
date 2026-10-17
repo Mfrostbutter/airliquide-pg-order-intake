@@ -1,0 +1,19 @@
+{
+ "gutter": 16,
+ "zones": [
+  {
+   "title": "LLM telemetry harvester",
+   "color": 6,
+   "body": "Every minute: list the last 30 executions (metadata only), keep the finished ones of the intake and the two agents that have no llm_call rows yet, fetch those one at a time with run data (at most 10), and insert one step_log row per model call (tokens in/out, duration), idempotent per execution, node and run. The dashboard sums them per order. Never pull execution data in bulk: 100 full executions in one call OOM-killed the lab. Production: the same llm.tokens.* attributes leave n8n over OpenTelemetry; this workflow is the PoC and chargeback path.",
+   "nodes": [
+    "EveryMinute",
+    "ListRecentExecutions",
+    "AlreadyHarvested",
+    "PickExecutions",
+    "FetchExecution",
+    "ExtractLlmCalls",
+    "InsertLlmCalls"
+   ]
+  }
+ ]
+}

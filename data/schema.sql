@@ -83,6 +83,10 @@ create table if not exists step_log (
   duration_ms  integer,
   at           timestamptz not null default now()
 );
+alter table step_log add column if not exists tokens_in integer;
+alter table step_log add column if not exists tokens_out integer;
+create index if not exists step_log_order_step_idx on step_log (order_id, step);
+create unique index if not exists step_log_llm_call_uidx on step_log (execution_id, (detail->>'node'), (detail->>'run_index')) where step = 'llm_call';
 
 create table if not exists draft_orders (
   id              bigserial primary key,
@@ -121,5 +125,13 @@ select
         / nullif(count(*) filter (where status not in ('not_an_order')), 0), 1) as automation_rate_pct,
   round(avg(extract(epoch from (finished_at - started_at)))
         filter (where finished_at is not null and decision = 'auto'), 1)       as avg_auto_seconds,
-  round(avg(confidence), 3)                                                    as avg_confidence
+  round(avg(confidence), 3)                                                    as avg_confidence,
+  (select count(*) from draft_orders where status = 'open')                    as desk_open,
+  (select round(avg(extract(epoch from (resolved_at - created_at))) / 60, 1)
+     from draft_orders where resolved_at is not null)                          as avg_desk_wait_minutes,
+  (select count(*) from step_log where step = 'guard')                         as guard_events,
+  (select coalesce(sum(coalesce(tokens_in, 0) + coalesce(tokens_out, 0)), 0)
+     from step_log where order_id is not null)                                 as tokens_total,
+  (select round(sum(coalesce(tokens_in, 0) + coalesce(tokens_out, 0))::numeric / nullif(count(distinct order_id), 0))
+     from step_log where step = 'llm_call' and order_id is not null)           as avg_tokens_per_order
 from order_intake;

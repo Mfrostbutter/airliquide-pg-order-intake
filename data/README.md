@@ -13,5 +13,9 @@ with `python3 scripts/make-fixture-files.py`.
 | f4-durand-inquiry | price request, not an order | not_an_order |
 | f5-durand-esb-retry (`--chaos 2`) | ESB answers 503 twice | backoff 4 s and 8 s, then SAP order |
 
+`scripts/send-fixture.py <fixture> --no-purge` re-sends the notification for an order
+that already exists: the intake must log `duplicate_notification` and stop.
+`scripts/load-test.py <fixture> --count N --concurrency K` sends N fresh copies.
+
 Air Liquide's anonymised dataset arrives during the PoC and goes under `fixtures/al/`,
 gitignored like the rest of `data/`.

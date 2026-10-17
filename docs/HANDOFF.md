@@ -1,7 +1,7 @@
 # Air Liquide PG Order Intake handoff
 
-State as of 2026-10-17: lab build complete and verified, PoC instance not yet
-installed. This document is the handoff from the lab phase to the PoC phase (Morgan
+State as of 2026-10-17 evening: lab build complete and verified (six workflows), PoC
+instance not yet installed. This document is the handoff from the lab phase to the PoC phase (Morgan
 Lupton, Madison Seeley) and the skeleton of the handoff to Air Liquide GDO after the
 20 Nov demo. `<poc>` marks what fills in once the EC2 exists.
 
@@ -31,7 +31,13 @@ and reads the plant's cut-off from the OCB stand-in to compute the earliest disp
 force 503s so the retry path can be rehearsed.
 
 **Metrics dashboard.** One page: orders received, automation rate, auto posted, sent
-to the desk, failures, average seconds per order, average confidence, last 25 orders.
+to the desk, failures, average seconds per order on the automated path, open desk queue
+and average desk wait on the human path, guard events, LLM tokens per order, last 25
+orders.
+
+**LLM telemetry harvester.** Every minute, reads the finished executions through the
+n8n API and records every model call with its token counts and duration against the
+order. The chargeback figures come from here.
 
 ## 2. Architecture
 
@@ -50,7 +56,8 @@ Diagram: `README.md`, section Architecture. Canvas screenshots: `docs/screenshot
 
 Four executions per order is what the proposal priced (intake, two agents, one
 reserve). The lab build uses three per order; the Wait for the order desk resumes
-the same execution.
+the same execution. Air Liquide gave the production volume as 10,000 orders a day on
+2026-10-17: topology, settings and model capacity in `DEPLOYMENT-ARCHITECTURE.md`.
 
 Constraints that bind the design (sources: RFP, Q&A of 2026-07-22, bidder grid):
 
@@ -61,13 +68,17 @@ Constraints that bind the design (sources: RFP, Q&A of 2026-07-22, bidder grid):
   are the promotion mechanism we committed to in the grid (rows 34 to 36).
 - Every transaction needs a correlation id across steps and per-call LLM telemetry
   (prompts, raw responses, tokens): grid rows 27 to 29. `order_id` is the correlation
-  id; `step_log` holds the telemetry. Token counts are not captured yet.
+  id, on every table row and on the execution's custom data; `step_log` holds the
+  prompts, tool calls, outputs and, since 2026-10-17, one `llm_call` row per model
+  call with tokens and duration.
+- Rules, thresholds and routing configurable without code (RFP requirement 6): the
+  four `AL_PG_*` variables in Settings > Variables.
 - Confidence-score routing to a human (grid row 10) is rule R9.
 
 ## 3. Credentials and secrets
 
-See `RUNBOOK.md`, Credentials. Summary: the lab has three n8n credentials (Postgres,
-LM Studio, Mailpit). The PoC needs Gmail/Pub/Sub service account, Gemini, Salesforce
+See `RUNBOOK.md`, Credentials. Summary: the lab has four n8n credentials (Postgres,
+LM Studio, Mailpit, the n8n API for the harvester). The PoC needs Gmail/Pub/Sub service account, Gemini, Salesforce
 API user, TIBCO ESB, and the instance Postgres. Air Liquide creates and rotates
 every AL-side credential; we enter them in the n8n credential store and nowhere else.
 Individual accounts only on the EC2 (Administrator Charter); no shared logins.
@@ -117,12 +128,18 @@ Gemini; it may be loosened but must not be removed without a golden-set run.
 | Salesforce Draft Order object and catalogue queries | Unknown; stand-in tables mirror the fields we need | Moctar Ba |
 | OCB cut-off API | Unknown; stand-in has two plants | Raphael Leitao, Luc Ebert |
 | Gemini endpoint and model | API key vs Vertex, EU endpoint | Narayana Ayyagari |
-| Token counts per LLM call | Not logged | Frosty |
+| Token counts per LLM call | Logged by the harvester (PoC path); OpenTelemetry on the instance is the production path | Frosty, Morgan |
+| Stand-ins to real systems | Node-by-node plan in `INTEGRATION-RUNBOOK.md`; blocked on the contracts above | Frosty |
 | Chargeback view | Dashboard shows counts and times; cost lines and BI tool undecided | Karine Fessard |
 | Non-order emails | Stop as `not_an_order`; no Salesforce case created | PG order team |
 | Instance error workflow | None; failures go by email from inside the workflow | Frosty |
 | Signavio BPMN import | Gap acknowledged in the proposal; out of PoC scope | Manuel |
 | Prerequisites document | Draft in `POC-PREREQUISITES.md`, needs Morgan's review before Romain sees it | Morgan |
+
+**Lab incident 2026-10-17:** the first harvester pulled 100 full executions per minute
+through the API and the lab container was OOM-killed three times. Rewritten to list
+metadata and fetch at most 10 executions one at a time; stable since. Lesson for the
+PoC instance: never read execution data in bulk through the API; use OpenTelemetry.
 
 ## 8. Escalation
 

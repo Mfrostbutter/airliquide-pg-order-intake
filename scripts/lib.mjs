@@ -89,13 +89,30 @@ const BEHAVIOR_FIELDS = [
   'alwaysOutputData', 'executeOnce', 'notesInFlow', 'notes',
 ];
 
-/** Reduces a workflow to its behavior, for comparison only. Never for export. */
-export function normalize(wf) {
+/** Reduces a workflow to its behavior, for comparison only. Never for export.
+ *  Portable references compare by name: credentials drop their instance id, and an
+ *  Execute Sub-workflow reference (repo: __workflowName; instance: id) becomes the
+ *  workflow name when opts.workflowNameById can resolve it. */
+export function normalize(wf, opts = {}) {
+  const byId = opts.workflowNameById ?? new Map();
+  const portable = (params) => {
+    const p = JSON.parse(JSON.stringify(params ?? {}));
+    const ref = p.workflowId;
+    if (ref && typeof ref === 'object' && ref.__rl) {
+      const name = ref.__workflowName ?? byId.get(String(ref.value ?? '')) ?? (ref.mode === 'list' ? ref.cachedResultName : undefined);
+      if (name) p.workflowId = { __rl: true, ref: name };
+    }
+    return p;
+  };
   const nodes = (wf.nodes ?? [])
     .filter((n) => !String(n.type ?? '').endsWith('stickyNote'))
     .map((n) => {
       const out = {};
       for (const f of BEHAVIOR_FIELDS) if (n[f] !== undefined) out[f] = n[f];
+      if (out.parameters) out.parameters = portable(out.parameters);
+      if (out.credentials) {
+        out.credentials = Object.fromEntries(Object.entries(out.credentials).map(([t, c]) => [t, { name: c?.name ?? '' }]));
+      }
       return out;
     })
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));

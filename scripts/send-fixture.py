@@ -4,6 +4,7 @@
 Usage: python3 scripts/send-fixture.py data/fixtures/<name>.json [--chaos N] [--test]
   --chaos N   make the mock ESB fail the first N posts for this order (exponential backoff demo)
   --test      hit the /webhook-test/ URL instead of the production webhook
+  --no-purge  keep the previous run of this order (rehearses a Pub/Sub redelivery: the intake must drop it)
 A fixture may list attachments as {"file": "<relative path>", "mime": "..."}; files are base64-encoded on the way in.
 Standard library only; the mailbox row is written through psql in the pg-lab container.
 """
@@ -41,6 +42,10 @@ def dq(s):
 
 
 order_id = "ORD-" + fx["email_id"]
+if "--no-purge" not in sys.argv:
+    # A re-sent fixture is a fresh order. Without --no-purge the previous run of this order is removed first.
+    psql(f"delete from al_poc.step_log where order_id = {dq(order_id)}; delete from al_poc.draft_orders where order_id = {dq(order_id)}; "
+         f"delete from al_poc.sales_orders where order_id = {dq(order_id)}; delete from al_poc.order_intake where order_id = {dq(order_id)};")
 psql(
     "insert into al_poc.mailbox (email_id, from_addr, subject, body_text, attachments) values ("
     f"{dq(fx['email_id'])}, {dq(fx['from'])}, {dq(fx['subject'])}, {dq(fx['body'])}, {dq(json.dumps(atts))}::jsonb) "

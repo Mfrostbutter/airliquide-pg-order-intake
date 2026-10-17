@@ -25,10 +25,26 @@ values are marked `<poc>` and get filled when Morgan Lupton's install lands.
 | AL PoC: Product Agent (resolve lines against catalog) | Called by the intake | Resolve each product line to a catalogue code, flag Elephant Orders, log tool calls | same |
 | AL PoC: Shipping Agent (resolve Ship-To and cut-off) | Called by the intake | Sold-To from the sender, Ship-To from the partner roles, cut-off from OCB, earliest dispatch date | same |
 | AL PoC: Mock TIBCO ESB (sales order API) | `POST /webhook/al-mock-tibco/sales-orders` | Lab stand-in only. Absent on the PoC instance; the real ESB endpoint takes its place | n8n FDE |
-| AL PoC: Metrics dashboard (order intake) | `GET /webhook/al-pg-order-metrics` | HTML dashboard over `order_intake` and `step_log` | n8n FDE, then AL GDO |
+| AL PoC: Metrics dashboard (order intake) | `GET /webhook/al-pg-order-metrics` | HTML dashboard over `order_intake`, `step_log`, `draft_orders` | n8n FDE, then AL GDO |
+| AL PoC: LLM telemetry harvester (tokens per call) | every minute | Reads finished executions through the n8n API, writes one `llm_call` row per model call. Needs the `Lab n8n API` credential | n8n FDE, then AL GDO |
 
-Deploy order after any change: Product Agent, Shipping Agent, intake, dashboard.
-n8n refuses to publish the intake while an agent it calls is unpublished.
+Deploy order after any change: Product Agent, Shipping Agent, intake, dashboard,
+harvester. n8n refuses to publish the intake while an agent it calls is unpublished.
+
+## Settings you can change without a deploy
+
+Settings > Variables. The gate and the backoff read them on every order; the code
+falls back to the default if a variable is missing or empty.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AL_PG_AUTO_CONFIDENCE_MIN` | 0.7 | rule R9: extraction confidence below this goes to the desk |
+| `AL_PG_ELEPHANT_QTY` | 80 | rule R7: any line above this is an Elephant Order |
+| `AL_PG_ESB_MAX_ATTEMPTS` | 5 | ESB retries before escalation |
+| `AL_PG_ESB_BACKOFF_BASE_S` | 4 | first wait in seconds; doubles each attempt |
+
+Verified 2026-10-17: with `AL_PG_ELEPHANT_QTY` at 5, a six-cylinder order went to the desk
+with R7 failing; back at 80 it posted automatically.
 
 ## Order lifecycle
 
@@ -44,9 +60,15 @@ Decision rules (the gate, `ApplyBusinessRules`):
 | R9 | Extraction confidence at or above 0.7 | Draft Order |
 | I10 | Cut-off note | Informational only |
 
-Thresholds are constants at the top of the generator (`AUTO_CONFIDENCE_MIN`,
-`ELEPHANT_QTY`, `ESB_MAX_ATTEMPTS`, `ESB_BACKOFF_BASE_S`). Change them there, rebuild,
-redeploy. Draft Order reasons use fixed wording; the model only writes the note.
+The generator constants (`AUTO_CONFIDENCE_MIN`, `ELEPHANT_QTY`, `ESB_MAX_ATTEMPTS`,
+`ESB_BACKOFF_BASE_S`) are only the fallbacks. Draft Order reasons use fixed wording;
+the model only writes the note.
+
+Other `step_log` rows worth knowing: `duplicate_notification` (a redelivered Pub/Sub
+message was dropped; the order was not touched), `guard` (the deterministic layer
+overruled an agent; `detail.kind` says why), `draft` (the desk wait starts here),
+`llm_call` (one per model call, with tokens and duration, written by the harvester
+within a minute of the execution finishing).
 
 ## Three most likely failures
 
@@ -66,6 +88,14 @@ redeploy. Draft Order reasons use fixed wording; the model only writes the note.
    to `product_catalog.aliases`; no redeploy needed. Check `step_log` for the agent's
    `search_product_by_name` calls to see what it searched.
 
+4. **Token tiles on the dashboard stop moving.** Cause: the harvester is inactive or
+   its `Lab n8n API` credential expired. Check its executions; recreate the API key and
+   the credential. Orders are unaffected.
+5. **The same email processed twice.** Should not happen: `OpenOrderRecord` is
+   idempotent on `order_id` and the second notification is logged as
+   `duplicate_notification`. If it does, the two notifications carried different message
+   ids for the same email: check the Gmail history cursor on the PoC instance.
+
 Other signals:
 
 - **`NotifyOpsFailure` email** (lab: `n8n-ops@al-poc.lab`): a node raised an error.
@@ -83,6 +113,7 @@ Other signals:
 | Lab Postgres al_poc | Postgres | Infisical n8n-FDE dev `PG_LAB_AL_POC_PASSWORD` | n8n FDE |
 | LM Studio (lab) | OpenAI-compatible | local, no key | n8n FDE |
 | Lab Mailpit SMTP | SMTP | local, no auth | n8n FDE |
+| Lab n8n API | Header Auth `X-N8N-API-KEY` | Infisical n8n-FDE dev `N8N_LOCAL_WORKFLOW_LAB_API_KEY` | n8n FDE |
 | PoC Gmail / Pub/Sub | Google service account | AL GCP project, handed over by Tristan Schultz | AL |
 | PoC Gemini | API key or Vertex AI | AL Google subscription | AL (Narayana Ayyagari) |
 | PoC Salesforce API user | OAuth2 or password | AL Salesforce sandbox | AL (Moctar Ba) |
@@ -100,7 +131,8 @@ All values live in the n8n credential store on the instance. None in workflow JS
 2. Edit `workflows/src/build_pg_order_intake.py`, rebuild, re-run the layout tool,
    `./scripts/validate.sh`.
 3. Deploy to the lab with `--activate`, agents first. Run the five fixtures, watch each
-   with `scripts/watch-order.py`.
+   with `scripts/watch-order.py`; redeliver one with `--no-purge`; run
+   `scripts/load-test.py` for a concurrency check.
 4. For the PoC instance: fill `deploy/creds.poc.json`, then
    `./scripts/deploy.sh workflows/dev/<file> poc --confirm` in the same order. Re-run
    the golden set and read the dashboard before calling it promoted.

@@ -159,6 +159,22 @@
           "responseCode": 500
         }
       }
+    },
+    {
+      "parameters": {
+        "content": "## Mock TIBCO ESB: POST /sales-orders\n\nLab stand-in for the ESB endpoint that creates the SAP sales order. If esb_chaos has remaining failures for this order it answers 503 and decrements, so a fixture can rehearse the intake workflow's exponential backoff. Otherwise it records the order and answers 201 with a SAP number, idempotent on order_id.",
+        "width": 1072,
+        "height": 656,
+        "color": 7
+      },
+      "id": "zone-01",
+      "name": "zone-01",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -176
+      ]
     }
   ],
   "connections": {
@@ -228,6 +244,7 @@
       ]
     }
   },
+  "active": true,
   "settings": {
     "executionOrder": "v1",
     "saveManualExecutions": true,

@@ -34,6 +34,19 @@ Linux (Ubuntu 22.04 or 24.04 LTS, or Amazon Linux 2023) with Docker Engine or Po
 Windows Server 2022 is possible only through Docker Desktop or WSL2 and is not recommended
 for a server; if Windows is mandatory, we need WSL2 enabled and Docker Engine inside it.
 
+## Software to approve before install
+
+The Administrator Charter forbids software outside Air Liquide's approved standards
+without the manager's sign-off. One approval request covering:
+
+| Package | Version | Why |
+|---|---|---|
+| Docker Engine or Podman | current stable | runs the containers |
+| n8n image `n8nio/n8n` | the release Morgan installs (lab: 2.35.5) | the platform |
+| PostgreSQL image | 16 | n8n's database and the application tables |
+| Reverse proxy (Caddy or nginx) with a certificate from Air Liquide's CA | current stable | TLS for the editor and the Pub/Sub push |
+| Nothing else | | Code nodes run in n8n's task runner; no extra packages on the host |
+
 ## Account provisioning (Citrix access to the EC2)
 
 Three accounts, technical role: Michael Frostbutter (FDE, build), Morgan Lupton (SE),
