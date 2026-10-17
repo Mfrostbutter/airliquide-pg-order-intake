@@ -135,6 +135,7 @@ Gemini; it may be loosened but must not be removed without a golden-set run.
 | Instance error workflow | None; failures go by email from inside the workflow | Frosty |
 | Signavio BPMN import | Gap acknowledged in the proposal; out of PoC scope | Manuel |
 | Prerequisites document | Draft in `POC-PREREQUISITES.md`, needs Morgan's review before Romain sees it | Morgan |
+| Video walk-through | Spec in `VIDEO-WALKTHROUGH.md`; three recordings, week of 2026-10-20; links land here on upload | Frosty |
 
 **Lab incident 2026-10-17:** the first harvester pulled 100 full executions per minute
 through the API and the lab container was OOM-killed three times. Rewritten to list
