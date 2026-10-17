@@ -70,6 +70,8 @@ repo agreed with the instance when you took it.
 - RPA stays Automation Anywhere, orchestrated over its API. No screen scraping in n8n.
 - Low-code is scored: business rules, agent specialisations and routing must be visible on the canvas or in prompts, not buried in code. The gate is a Code node by design (deterministic, auditable); thresholds are constants at the top of it and are the first candidates for workflow variables.
 - Deliverables per the RFP: runnable code and config, open platform access, financial reporting with a chargeback view, the supplementary feature-tracking document.
+- Contract and conduct (contract template, DS_GC01, Administrator Charter, Supplier CoC; read 2026-10-17): work built under the services contract becomes Air Liquide's IP; AL may audit yearly; reversibility assistance up to six months; subcontractors need written approval; individual credentials only, no unapproved software on the EC2, no bypass of tracing, incidents to the AL Helpdesk and IPC; no public use of the Air Liquide name or of this engagement without written authorisation (speaking register: internal-only).
+- Grid commitments the build is measured against are listed in `docs/RFP-BRIEF.md` (correlation id, LLM telemetry per call, Git-backed Dev/UAT/Prod, confidence routing). Token counts per LLM call are not logged yet.
 
 ## Lab stand-ins
 
@@ -104,6 +106,9 @@ Database `al_poc` on `pg-lab`, schema `data/schema.sql`, seed `data/seed.sql`, o
 - [ ] Gemini: API key or Vertex AI, which model, EU endpoint. Owner Narayana Ayyagari
 - [ ] Golden dataset: the seventeen PG orders and the expected critical fields, for Evaluations. Owner Air Liquide PG order team
 - [ ] Multi-attachment emails and DOCX: in PoC scope, or Document AI? Owner Romain Fassi
+- [ ] Existing AL agents for this use case (Q&A row 9): what they do, reuse or not. Owner Romain Fassi
+- [ ] Where n8n is 'already live at Air Liquide' (deck fit slide). Owner Manuel
+- [ ] SAP sandbox confirmed for the PoC (Q&A row 11, TBC). Owner Vorith Top
 - [ ] Non-order emails (inquiries, complaints): stop, or create a Salesforce case? Owner PG order team
 - [ ] Chargeback view: which cost lines (executions, tokens) and which BI tool. Owner Karine Fessard
 - [ ] Evaluation grid and PoC planning document from Air Liquide: Manuel forwards when received (action from 2026-10-16 sync)
@@ -115,3 +120,4 @@ Database `al_poc` on `pg-lab`, schema `data/schema.sql`, seed `data/seed.sql`, o
 Append one line per working session: date, what changed, what is deployed where.
 
 - 2026-10-16 — Engagement scaffolded from the RFP pack (Drive folder from Manuel). Five workflows built and verified on the lab: intake `ufx7qhXP8jGqVrus`, Product Agent `yxP9Kgx9uVyEFiRZ`, Shipping Agent `n5UiTb8wRn3qwZ84`, mock ESB `s48vrlMZEkw41gJn`, dashboard `nxdYyNbocTuhw0Jk`. Fixtures F1 (clean, auto, 28 s), F2 (XLSX, auto, 17 s), F3 (PDF, Elephant + unknown product + returns, Draft Order, approved by email link, posted), F4 (inquiry, stopped), F5 (ESB 503 twice, backoff 4 s + 8 s, posted) all pass. Private GitHub repo created and pushed with README and canvas screenshots; synthetic `data/` (schema, seed, fixtures) now tracked, `data/fixtures/al/` stays ignored.
+- 2026-10-17 — Rest of the Drive pack read (presentation decks, final answer grid, contract template, codes of conduct). RUNBOOK.md and HANDOFF.md written; RFP-BRIEF.md carries the grid commitments, new Q&A facts and deck facts. No lab change.

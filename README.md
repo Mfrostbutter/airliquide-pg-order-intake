@@ -181,4 +181,5 @@ metrics.
 - Gemini via Vertex AI in place of LM Studio; re-check the lexical guard against it.
 
 See `CLAUDE.md` for contacts, instance map and conventions, `docs/RFP-BRIEF.md` for
-the requirement digest.
+the requirement digest and the answer-grid commitments, `docs/RUNBOOK.md` for
+operations, `docs/HANDOFF.md` for the phase handoff.

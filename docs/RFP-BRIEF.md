@@ -1,9 +1,14 @@
 # Air Liquide RFP: what the PoC has to prove
 
-Sources (Drive folder shared by Manuel Craciun, read 2026-10-16): RFP PDF dated
-2026-06-30 (Emmanuel Delort), Q&A sheet of 2026-07-22, n8n proposal v5 of
-2026-09-11, RFP presentation deck of 2026-09-24, PoC architecture deck "POC n8n"
-(Romain Fassi, GDO). Newest source wins where they differ.
+Sources (Drive folder shared by Manuel Craciun). Read in full 2026-10-16: RFP PDF
+dated 2026-06-30 (Emmanuel Delort), Q&A sheet of 2026-07-22 (37 rows), n8n proposal
+v5 of 2026-09-11, PoC architecture deck "POC n8n" (Romain Fassi, GDO). Read in full
+2026-10-17: RFP presentation deck of 2026-09-24 (updated 2026-10-16), TP deck of
+2026-10-08 (generic n8n intro, nothing AL-specific), final bidder answer grid with
+n8n's answers (75 requirements), contract template, IT administrators charter, Code
+of Conduct for Digital Protection DS_GC01 rev3, Supplier Code of Conduct rev2. Not
+read: the demo video (mp4), the draft answers v4 (superseded by v5), the two blank
+copies of the bidder grid. Newest source wins where they differ.
 
 ## The process
 
@@ -83,3 +88,54 @@ acceptable to AL; the data plane must be private.
   checks after it.
 - The order desk review lives in Salesforce as a Draft Order; n8n forms and email
   are alternatives.
+
+## Answer-grid commitments the PoC must honour (bidder grid, Sep 2026)
+
+n8n answered 75 requirements. The ones the build is measured against:
+
+- Confidence-score routing to a human below a threshold (row 10): rule R9.
+- Dynamic fallback on agent errors or hallucination alerts to a human (rows 12, 26):
+  structured output parser, verify step, C6, Draft Order.
+- Correlation id across every step and a unified chronological audit trail
+  (rows 27, 31): `order_id` on every `step_log` row and on the execution.
+- Per-transaction LLM telemetry: prompts, raw responses, token counts, reasoning
+  (row 29): `step_log` holds the extraction and tool calls; token counts still missing.
+- Dev / UAT / Prod promotion through Git-backed environments (rows 34 to 36, 60, 62).
+- Monitoring via Insights, Log Streaming, Prometheus and OpenTelemetry (rows 23, 25,
+  27); cost dashboards built from execution metrics, Insights exported to BI (row 70).
+- Separate SLA monitoring for automated and human steps (row 65): `step_log`
+  durations per step; desk wait time is the gap between `pending_review` and resolution.
+- Templates library for reuse on self-hosted (row 61).
+- Gaps stated openly: no native BPMN import (rows 17, 18, 66), no native OCR (rows 1,
+  9), RPA through the HTTP node (row 32), no dedicated China services (row 64).
+
+## Q&A facts added 2026-10-17
+
+- Air Liquide already has agents built for this use case; reusable, not mandatory
+  (row 9). Ask Romain Fassi what they do before the workshop.
+- SAP sandbox for the PoC is likely (the one the internal team uses), to be
+  confirmed (row 11).
+- Target production start: beginning of 2027 (row 16). PG Order Intake in production
+  at M4 in the proposal plan.
+- Dev / UAT / Prod is mandatory; 10 to 20 CoE licences as a first estimate (row 25).
+- The platform must support workflows running every five minutes with no service
+  interruption; "4:30 PM" was only an example (rows 22, 33).
+- Bring Your Own Connector is a no-go criterion if absent (row 29). Split plane: SaaS
+  control plane acceptable, data plane private (rows 30, 37).
+- The deep assessment phase runs three weeks to a month on AL's ecosystem (row 21).
+
+## Deck facts (2026-09-24 presentation)
+
+- n8n team as presented: Manuel Craciun (AE, primary contact), Morgan Lupton (SE),
+  Emmanuel Bommelaer (CSM), Jonathan King (Enterprise Sales Leader EMEA, executive
+  sponsor), FDE/TAM as an option. Overall fit claimed 97% of the 75 requirements.
+- Honest gaps slide: RPA runtime stays with the current vendor; no native Signavio;
+  no advanced chargeback (Insights export to BI); no native IDP/OCR.
+- Pricing: Scale 86K, Signature 215K (Y1), Signature+ 388K (Y2, Y3); 991K over three
+  years; execution blocks of 300,000 at 8K pre-ordered or 10K pay-as-you-go. PG order
+  intake sized at four executions per order on 2.5M orders a year.
+- Plan: M2 Europe prod live, M4 Americas and APAC live with PG Order Intake in
+  production, M6 all retained bots orchestrated, M12 transition done.
+- "Already live at Air Liquide" appears on the fit slide: some n8n use exists at AL
+  today. Ask Manuel where.
+
